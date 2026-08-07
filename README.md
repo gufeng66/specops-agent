@@ -195,6 +195,3 @@ specops-agent/
 - `backend/.env` 仅供本地使用，已被 `.gitignore` 排除。
 - API Key 一旦进入日志、提交历史或公开渠道，应立即在服务商控制台轮换。
 - 上传前请检查 `.env`、`*.db`、`*.log`、IDE 配置和构建产物未被追踪。
-
-更多实现细节见 [backend/README.md](backend/README.md) 和
-[docs/INTERVIEW.md](docs/INTERVIEW.md)。
