@@ -1,0 +1,115 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg-deep: #0c1117;
+  --bg-panel: rgba(18, 24, 32, 0.85);
+  --border: rgba(99, 140, 177, 0.2);
+  --text: #e8edf4;
+  --text-muted: #8fa3b8;
+  --accent: #3d8bfd;
+  --accent-dim: #2563a8;
+  --success: #34c759;
+  --warn: #ffb020;
+  --error: #ff5c5c;
+  --font: 'DM Sans', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+}
+
+html, body, #app {
+  min-height: 100vh;
+}
+
+body {
+  font-family: var(--font);
+  color: var(--text);
+  background: var(--bg-deep);
+  background-image:
+    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(61, 139, 253, 0.12), transparent),
+    radial-gradient(ellipse 60% 40% at 90% 100%, rgba(52, 199, 89, 0.06), transparent),
+    linear-gradient(180deg, #0c1117 0%, #111820 100%);
+  line-height: 1.5;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  padding: 0.55rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: background 0.15s, transform 0.1s;
+}
+
+button:active { transform: scale(0.98); }
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover { background: var(--accent-dim); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover { color: var(--text); border-color: var(--accent); }
+
+.btn-success {
+  background: var(--success);
+  color: #0c1117;
+}
+
+textarea, input, select {
+  font-family: var(--font);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 0.65rem 0.85rem;
+  width: 100%;
+  font-size: 0.9rem;
+}
+
+textarea { min-height: 140px; resize: vertical; }
+
+textarea:focus, input:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  backdrop-filter: blur(12px);
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(61, 139, 253, 0.15);
+  color: var(--accent);
+}
+
+.badge-warn { background: rgba(255, 176, 32, 0.15); color: var(--warn); }
+.badge-error { background: rgba(255, 92, 92, 0.15); color: var(--error); }
+
+.mono { font-family: var(--mono); font-size: 0.8rem; }
+
+@media (max-width: 768px) {
+  .grid-2 { grid-template-columns: 1fr !important; }
+}
