@@ -1,0 +1,23 @@
+{
+  "id": "multi_03",
+  "source_text": "会议目标：支付修复联调\n参会人：孙磊、邓凯\n支付修复由孙磊负责开发，邓凯配合回归测试，本周完成。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "支付"
+        ],
+        "primary_owner": "孙磊",
+        "secondary_owners": [
+          "邓凯"
+        ]
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

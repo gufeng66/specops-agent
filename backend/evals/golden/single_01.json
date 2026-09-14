@@ -1,0 +1,21 @@
+{
+  "id": "single_01",
+  "source_text": "会议目标：Q1 发布冲刺\n参会人：张伟、李娜\n张伟负责完成用户认证模块重构，下周五前提交代码评审。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "认证"
+        ],
+        "primary_owner": "张伟",
+        "secondary_owners": []
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "multi_01",
+  "source_text": "会议目标：新产品上线\n参会人：周婷、孙磊、邓凯、马超\n新产品上线工作由周婷统筹，孙磊、邓凯和马超配合，截止时间为2026年8月31日。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "上线"
+        ],
+        "primary_owner": "周婷",
+        "secondary_owners": [
+          "孙磊",
+          "邓凯",
+          "马超"
+        ]
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

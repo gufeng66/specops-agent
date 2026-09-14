@@ -1,0 +1,21 @@
+{
+  "id": "single_03",
+  "source_text": "会议目标：预发部署\n参会人：王强、张伟\n王强安排预发环境部署测试，确认本月底上线。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "部署"
+        ],
+        "primary_owner": "王强",
+        "secondary_owners": []
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

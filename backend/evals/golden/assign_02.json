@@ -1,0 +1,29 @@
+{
+  "id": "assign_02",
+  "source_text": "会议目标：文档补齐\n参会人：李娜、王强\n接口说明本周内需要完成更新并发布到内部 Wiki。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": true,
+    "items": [
+      {
+        "title_keywords": [
+          "更新"
+        ],
+        "primary_owner": "李娜",
+        "secondary_owners": []
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": [
+      {
+        "title_keywords": [
+          "更新"
+        ],
+        "primary_owner": "李娜",
+        "secondary_owners": []
+      }
+    ]
+  }
+}

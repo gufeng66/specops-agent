@@ -1,0 +1,21 @@
+{
+  "id": "clarify_02",
+  "source_text": "参会人：李娜\n李娜跟进监控看板修复，本周完成。",
+  "expect": {
+    "needs_clarify": true,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "监控"
+        ],
+        "primary_owner": "李娜",
+        "secondary_owners": []
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "补齐监控看板",
+    "assignments": []
+  }
+}

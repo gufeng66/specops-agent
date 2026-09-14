@@ -1,0 +1,21 @@
+{
+  "id": "single_04",
+  "source_text": "会议目标：监控补齐\n参会人：邓凯、孙磊\n邓凯负责完成告警规则修复，本周五前提交。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "告警"
+        ],
+        "primary_owner": "邓凯",
+        "secondary_owners": []
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "assign_03",
+  "source_text": "会议目标：预发验证\n参会人：王强、张伟\n预发环境部署测试这周要安排上线确认。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": true,
+    "items": [
+      {
+        "title_keywords": [
+          "部署"
+        ],
+        "primary_owner": "王强",
+        "secondary_owners": [
+          "张伟"
+        ]
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": [
+      {
+        "title_keywords": [
+          "部署"
+        ],
+        "primary_owner": "王强",
+        "secondary_owners": [
+          "张伟"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "id": "assign_01",
+  "source_text": "会议目标：发布准备\n参会人：张伟、李娜\n认证模块这周要完成代码评审并提交。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": true,
+    "items": [
+      {
+        "title_keywords": [
+          "认证"
+        ],
+        "primary_owner": "张伟",
+        "secondary_owners": []
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": [
+      {
+        "title_keywords": [
+          "认证"
+        ],
+        "primary_owner": "张伟",
+        "secondary_owners": []
+      }
+    ]
+  }
+}

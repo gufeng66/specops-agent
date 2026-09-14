@@ -1,0 +1,23 @@
+{
+  "id": "multi_04",
+  "source_text": "会议目标：灰度准备\n参会人：周婷、孙磊、马超\n灰度白名单配置由孙磊负责完成，马超配合提供名单。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "白名单"
+        ],
+        "primary_owner": "孙磊",
+        "secondary_owners": [
+          "马超"
+        ]
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

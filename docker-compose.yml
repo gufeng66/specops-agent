@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-none}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      CORS_ORIGINS: http://localhost:5173,http://frontend:5173
+      DATABASE_PATH: /data/specops.db
+      CHECKPOINT_PATH: /data/specops_checkpoints.db
+    volumes:
+      - backend-data:/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_PROXY: http://backend:8001
+    depends_on:
+      - backend
+
+volumes:
+  backend-data:

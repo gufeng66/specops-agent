@@ -1,0 +1,21 @@
+{
+  "id": "single_02",
+  "source_text": "会议目标：文档同步\n参会人：李娜、王强\n李娜跟进 API 文档更新，本周内完成并发布。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "文档"
+        ],
+        "primary_owner": "李娜",
+        "secondary_owners": []
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

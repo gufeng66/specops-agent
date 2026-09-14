@@ -1,0 +1,23 @@
+{
+  "id": "multi_02",
+  "source_text": "会议目标：事故复盘整改\n参会人：张伟、李娜\n根因报告由张伟牵头，李娜协助整理时间线并跟进通报。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "根因"
+        ],
+        "primary_owner": "张伟",
+        "secondary_owners": [
+          "李娜"
+        ]
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

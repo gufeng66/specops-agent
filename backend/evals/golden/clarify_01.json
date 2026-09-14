@@ -1,0 +1,21 @@
+{
+  "id": "clarify_01",
+  "source_text": "参会人：张三\n张三负责完成部署测试。",
+  "expect": {
+    "needs_clarify": true,
+    "needs_assignment": false,
+    "items": [
+      {
+        "title_keywords": [
+          "部署"
+        ],
+        "primary_owner": "张三",
+        "secondary_owners": []
+      }
+    ]
+  },
+  "gold": {
+    "clarify": "明确部署目标",
+    "assignments": []
+  }
+}
