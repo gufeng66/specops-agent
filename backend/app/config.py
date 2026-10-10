@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
     llm_timeout_seconds: int = 30
+    llm_max_retries: int = 2  # 不含首次；仅 429/5xx/传输错误。超时不重试
+    llm_retry_base_seconds: float = 0.4  # 测试置 0，避免真睡
+    llm_retry_budget_seconds: float = 8  # 单次 post_completions 退避睡眠总和上限
+    llm_max_concurrency: int = 3
     cors_origins: str = "http://localhost:5173"
     database_path: str = "./specops.db"
     checkpoint_path: str = "./specops_checkpoints.db"

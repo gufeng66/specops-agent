@@ -1,0 +1,13 @@
+{
+  "id": "compound_name",
+  "source_text": "会议目标：发布评审\n欧阳修：认证模块今天要收口。\nAlex：我来补回归用例，周五前完成。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {"title_keywords": ["认证"], "primary_owner": "欧阳修", "secondary_owners": []},
+      {"title_keywords": ["回归"], "primary_owner": "Alex", "secondary_owners": []}
+    ]
+  },
+  "gold": {"clarify": "", "assignments": []}
+}

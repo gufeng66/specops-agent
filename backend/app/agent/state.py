@@ -41,9 +41,12 @@ class AgentState(TypedDict, total=False):
     repair_attempts: int
     assign_attempts: int
     pending_events: Annotated[list, _replace]
-    sync_status: str
     review: dict
     graph_ns: str
+    eval_mode: str
+    eval_pre_enrich_stakeholders: Annotated[list, _replace]
+    eval_scored_items: Annotated[list, _replace]
+    prompt_version: str
 
 
 def snapshot_to_state(snapshot: ThreadSnapshot, **overrides: Any) -> AgentState:
@@ -65,7 +68,6 @@ def snapshot_to_state(snapshot: ThreadSnapshot, **overrides: Any) -> AgentState:
         "repair_attempts": snapshot.validation.repair_attempts,
         "assign_attempts": 0,
         "pending_events": [],
-        "sync_status": snapshot.sync_status or "not_synced",
         "review": snapshot.review.model_dump(mode="json"),
         "graph_ns": snapshot.graph_ns,
     }
@@ -93,8 +95,8 @@ def state_to_snapshot(state: AgentState, base: ThreadSnapshot | None = None) -> 
     snap.interrupt_id = state.get("interrupt_id") or ""
     if "interrupt_payload" in state:
         snap.interrupt_payload = state.get("interrupt_payload")
-    snap.sync_status = state.get("sync_status") or "not_synced"
     snap.graph_ns = state.get("graph_ns") or snap.graph_ns
+    snap.prompt_version = state.get("prompt_version") or snap.prompt_version
     if state.get("review") is not None:
         snap.review = ReviewInfo.model_validate(state["review"])
     return snap

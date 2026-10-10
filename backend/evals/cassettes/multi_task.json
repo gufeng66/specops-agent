@@ -1,0 +1,21 @@
+{
+  "prompt_version": "2026-10-07",
+  "entries": {
+    "883bdda1189b41ee8a7b06a9b21ad042b23945705b5aca03fb9586dd61326bd2": {
+      "role": "assistant",
+      "content": "{\"brief\": {\"goal\": \"收尾\", \"stakeholders\": [\"周婷\"], \"meeting_date\": \"\", \"context\": \"收尾\"}}"
+    },
+    "423ecd210eb369ac49e1cb62b1e430e1182b96dfd002d3c650c5f2a4d166254b": {
+      "role": "assistant",
+      "content": "{\"items\": [{\"title\": \"写发布说明\", \"description\": \"写发布说明\", \"primary_owner\": \"周婷\", \"secondary_owners\": [], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"周婷：我负责写发布说明，周五完成。\", \"inference_reason\": \"\", \"unresolved_ref\": \"\", \"priority\": \"medium\"}, {\"title\": \"核对回滚步骤\", \"description\": \"核对回滚步骤\", \"primary_owner\": \"周婷\", \"secondary_owners\": [], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"另外我再核对回滚步骤。\", \"inference_reason\": \"\", \"unresolved_ref\": \"\", \"priority\": \"medium\"}]}"
+    },
+    "2e66ca28887c741717415d47582d905ab0dab8a76dc09a70b76f44b7c2b10483": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    },
+    "1186d98d641f209e5a215e28014c3ef28a063d353f3b37939ac83efe1a365779": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    }
+  }
+}

@@ -22,9 +22,11 @@ from app.agent.events import (
     emit_tool_result,
 )
 from app.agent.graph import get_compiled_graph
+from app.agent.prompts import PROMPT_VERSION
 from app.agent.state import snapshot_to_state, state_to_snapshot
 from app.domain.models import ThreadSnapshot, ThreadStatus
 from app.memory.store import MemoryStore
+from app.obs import bind_request, flush_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -57,59 +59,69 @@ class SpecOpsWorkflow:
         source_text: str,
         request_id: str,
         clarify_response: str | None = None,
+        eval_mode: str | None = None,
     ) -> AsyncIterator[str]:
-        """开跑或澄清续跑。澄清用 Command(resume)，graph_ns 沿用，不新开 checkpoint。"""
+        """开跑或澄清续跑。澄清用 Command(resume)，graph_ns 沿用，不新开 checkpoint。
+
+        eval_mode 只给评测。不传时节点保持原行为。
+        """
         run_id = str(uuid4())
         snapshot.run_id = run_id
         snapshot.source_text = source_text
         snapshot.status = ThreadStatus.PLANNING
+        snapshot.prompt_version = PROMPT_VERSION
 
         resuming_clarify = bool(clarify_response and snapshot.graph_ns and snapshot.interrupt_id)
         if not resuming_clarify:
             snapshot.graph_ns = f"{snapshot.thread_id}:{run_id}"
 
-        await self.store.save_thread(snapshot)
+        with bind_request(request_id, run_id):
+            logger.info("chat start")
+            await self.store.save_thread(snapshot)
 
-        yield emit_metadata(
-            {"run_id": run_id, "thread_id": snapshot.thread_id, "request_id": request_id}
-        )
+            yield emit_metadata(
+                {"run_id": run_id, "thread_id": snapshot.thread_id, "request_id": request_id}
+            )
 
-        try:
-            if resuming_clarify:
-                resume_payload = {
-                    "clarify_response": clarify_response,
-                    "feedback": clarify_response,
-                    "goal": clarify_response,
-                }
-                async for event in self._stream_graph(
+            try:
+                if resuming_clarify:
+                    resume_payload = {
+                        "clarify_response": clarify_response,
+                        "feedback": clarify_response,
+                        "goal": clarify_response,
+                    }
+                    async for event in self._stream_graph(
+                        snapshot,
+                        Command(resume=resume_payload),
+                        request_id=request_id,
+                        run_id=run_id,
+                    ):
+                        yield event
+                    return
+
+                initial = snapshot_to_state(
                     snapshot,
-                    Command(resume=resume_payload),
-                    request_id=request_id,
+                    source_text=source_text,
                     run_id=run_id,
+                    status=ThreadStatus.PLANNING.value,
+                    clarify_response=clarify_response,
+                    graph_ns=snapshot.graph_ns,
+                    pending_events=[],
+                    interrupt_id="",
+                    interrupt_payload=None,
+                    review_action=None,
+                    prompt_version=PROMPT_VERSION,
+                )
+                if eval_mode:
+                    initial["eval_mode"] = eval_mode
+                async for event in self._stream_graph(
+                    snapshot, initial, request_id=request_id, run_id=run_id
                 ):
                     yield event
-                return
-
-            initial = snapshot_to_state(
-                snapshot,
-                source_text=source_text,
-                run_id=run_id,
-                status=ThreadStatus.PLANNING.value,
-                clarify_response=clarify_response,
-                graph_ns=snapshot.graph_ns,
-                pending_events=[],
-                interrupt_id="",
-                interrupt_payload=None,
-                review_action=None,
-            )
-            async for event in self._stream_graph(
-                snapshot, initial, request_id=request_id, run_id=run_id
-            ):
-                yield event
-        except Exception as exc:
-            logger.exception("run_chat failed")
-            yield emit_error(str(exc))
-            yield emit_done()
+            except Exception as exc:
+                logger.exception("run_chat failed")
+                yield emit_error(str(exc))
+                yield emit_done()
 
     async def resume(
         self,
@@ -128,32 +140,34 @@ class SpecOpsWorkflow:
         snapshot.status = ThreadStatus.PLANNING
         if not snapshot.graph_ns:
             snapshot.graph_ns = f"{snapshot.thread_id}:{run_id}"
-        await self.store.save_thread(snapshot)
+        with bind_request(request_id, run_id):
+            logger.info("resume start")
+            await self.store.save_thread(snapshot)
 
-        yield emit_metadata(
-            {"run_id": run_id, "thread_id": snapshot.thread_id, "request_id": request_id}
-        )
+            yield emit_metadata(
+                {"run_id": run_id, "thread_id": snapshot.thread_id, "request_id": request_id}
+            )
 
-        try:
-            payload: dict[str, Any] = {
-                "approve": approve,
-                "revision_scope": revision_scope,
-                "target_item_id": target_item_id,
-                "feedback": feedback,
-                "assignments": assignments or [],
-                "drop_item_ids": drop_item_ids or [],
-            }
-            async for event in self._stream_graph(
-                snapshot,
-                Command(resume=payload),
-                request_id=request_id,
-                run_id=run_id,
-            ):
-                yield event
-        except Exception as exc:
-            logger.exception("resume failed")
-            yield emit_error(str(exc))
-            yield emit_done()
+            try:
+                payload: dict[str, Any] = {
+                    "approve": approve,
+                    "revision_scope": revision_scope,
+                    "target_item_id": target_item_id,
+                    "feedback": feedback,
+                    "assignments": assignments or [],
+                    "drop_item_ids": drop_item_ids or [],
+                }
+                async for event in self._stream_graph(
+                    snapshot,
+                    Command(resume=payload),
+                    request_id=request_id,
+                    run_id=run_id,
+                ):
+                    yield event
+            except Exception as exc:
+                logger.exception("resume failed")
+                yield emit_error(str(exc))
+                yield emit_done()
 
     async def _stream_graph(
         self,
@@ -201,6 +215,7 @@ class SpecOpsWorkflow:
             snap = state_to_snapshot(values, snapshot)
             snap.graph_ns = ns
             snap.interrupt_payload = payload
+            flush_metrics(snap)
             await self.store.save_thread(snap)
             await self.store.complete_request(request_id, snap.thread_id, run_id, snap)
             hitl_node = str(payload.get("type") or "review")
@@ -212,6 +227,7 @@ class SpecOpsWorkflow:
 
         snap = state_to_snapshot(values, snapshot)
         snap.graph_ns = ns
+        flush_metrics(snap)
         if snap.status != ThreadStatus.COMPLETED and snap.markdown_output:
             snap.status = ThreadStatus.COMPLETED
         await self.store.save_thread(snap)

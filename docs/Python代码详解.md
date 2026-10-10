@@ -272,7 +272,7 @@ __all__ = [ ... ]
 
 - `interrupt_payload`：当前暂停时前端要渲染的 JSON（澄清文案、待分配任务、干系人名单……）。
 - `graph_ns`：LangGraph checkpointer 的 thread_id。澄清 resume **必须沿用**，否则 `Command(resume=...)` 找不到档。
-- `sync_status`：写死演示，`finalize` 设为 `not_synced`。
+- 快照不再带外部同步状态。写入 Jira / 飞书仍是未实现项。
 - `markdown_output`：finalize 才填充；导出接口若为空会现场再渲染一份。
 
 ### 分：`ActionItemList` / `MeetingBriefExtract`
@@ -863,7 +863,7 @@ payload 带全部任务摘要 + 未解决 ERROR + advisory，前端审核面板�
 
 ### 分：`finalize_node(state)`
 
-`export_markdown_tool` → `markdown_output`。`review.approved=True`。`status=completed`。`sync_status=not_synced`。`review_action=None`。进度：tool_result 字数 + finalize done。
+`export_markdown_tool` → `markdown_output`。`review.approved=True`。`status=completed`。`review_action=None`。进度：tool_result 字数 + finalize done。
 
 **不检查** owner ERROR：人已经在 review 点了批准。
 

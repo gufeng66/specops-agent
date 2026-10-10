@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
+import time
 from typing import Any, TypeVar
 
 import httpx
@@ -27,6 +29,7 @@ from app.config import settings
 from app.domain.chunking import sample_for_brief
 from app.domain.models import ActionItemList, MeetingBriefExtract, OwnerSuggestionBatch
 from app.llm.errors import LLMAPIError, LLMConfigError, LLMError, LLMParseError, LLMTimeoutError
+from app.obs import add_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +56,47 @@ class LLMClient:
         return payload
 
     async def post_completions(self, payload: dict[str, Any], node: str) -> dict[str, Any]:
-        """POST chat/completions。wait_for 卡墙钟；httpx 读超时只在分块之间重置。"""
+        """POST chat/completions。超时不重试。429/5xx/传输错误最多再试 llm_max_retries 次。
+
+        chat_json 另有一轮 schema 重试，因此一次逻辑抽取的 HTTP 上限是
+        2 * (1 + llm_max_retries)。退避睡眠总和不超过 llm_retry_budget_seconds。
+        """
         if self.provider not in ("deepseek",):
             raise LLMConfigError(f"Unsupported LLM_PROVIDER={self.provider}")
         if not settings.deepseek_api_key:
             raise LLMConfigError("DEEPSEEK_API_KEY is empty")
 
-        timeout_s = settings.llm_timeout_seconds
         payload = self._with_thinking_disabled(payload)
+        attempts = 1 + max(0, settings.llm_max_retries)
+        slept = 0.0
+        last_error: LLMAPIError | None = None
+        for attempt in range(attempts):
+            started = time.perf_counter()
+            try:
+                data = await self._post_once(payload, node)
+            except LLMTimeoutError:
+                raise
+            except LLMAPIError as exc:
+                last_error = exc
+                if not _retryable_status(exc.status_code) or attempt == attempts - 1:
+                    raise
+                slept += await self._backoff(attempt, slept)
+                continue
+            usage = data.get("usage") or {}
+            elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
+            add_llm_usage(
+                int(usage.get("prompt_tokens") or 0),
+                int(usage.get("completion_tokens") or 0),
+                elapsed_ms,
+            )
+            logger.info("llm ok node=%s latency_ms=%s", node, elapsed_ms)
+            return data
+        raise last_error or LLMAPIError(f"{node}: retries exhausted")
+
+    async def _post_once(self, payload: dict[str, Any], node: str) -> dict[str, Any]:
+        timeout_s = settings.llm_timeout_seconds
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
-                # wait_for caps wall-clock time; httpx read timeout only resets between chunks.
                 resp = await asyncio.wait_for(
                     client.post(self._completions_url(), headers=self._headers(), json=payload),
                     timeout=timeout_s,
@@ -84,6 +117,15 @@ class LLMClient:
             return resp.json()
         except json.JSONDecodeError as exc:
             raise LLMParseError(f"{node}: response is not JSON") from exc
+
+    async def _backoff(self, attempt: int, slept: float) -> float:
+        """指数退避加抖动。base 为 0 或预算用尽时不睡。"""
+        room = max(0.0, float(settings.llm_retry_budget_seconds) - slept)
+        raw = float(settings.llm_retry_base_seconds) * (2**attempt) * (0.5 + random.random())
+        delay = min(raw, room)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return delay
 
     async def structured_extract_brief(self, source_text: str) -> MeetingBriefExtract | None:
         """intake：失败返回 None，由节点保留规则底稿。"""
@@ -159,31 +201,33 @@ class LLMClient:
         model_cls: type[T],
         node: str = "llm",
     ) -> T:
-        """json_object 一轮：解析 content 再 Pydantic 校验。"""
-        payload = {
-            "model": settings.deepseek_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.1,
-        }
-        data = await self.post_completions(payload, node)
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LLMParseError(f"{node}: unexpected response shape") from exc
-
-        try:
-            parsed = json.loads(content)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise LLMParseError(f"{node}: content is not valid JSON") from exc
-
-        try:
-            return model_cls.model_validate(parsed)
-        except ValidationError as exc:
-            raise LLMParseError(f"{node}: schema validation failed: {exc.errors()[:3]}") from exc
+        """json_object。JSON 或 schema 失败时再请求一次。每轮各自走传输重试。"""
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        data = await self.post_completions(_json_payload(messages), node)
+        parsed, content, kind, detail = _parse_json_choice(data, model_cls)
+        if kind == "ok":
+            return parsed
+        if kind == "shape":
+            raise LLMParseError(f"{node}: unexpected response shape")
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "上次输出无法通过校验，请只输出修正后的 JSON 对象。\n"
+                    f"原始输出：\n{content}\n错误：\n{detail}"
+                ),
+            }
+        )
+        data = await self.post_completions(_json_payload(messages), node)
+        parsed, _content, kind, detail = _parse_json_choice(data, model_cls)
+        if kind == "json":
+            raise LLMParseError(f"{node}: content is not valid JSON")
+        if kind != "ok":
+            raise LLMParseError(f"{node}: schema validation failed: {detail}")
+        return parsed
 
     async def chat_tools(
         self,
@@ -207,6 +251,40 @@ class LLMClient:
         if not isinstance(message, dict):
             raise LLMParseError(f"{node}: assistant message is not an object")
         return message
+
+
+def _retryable_status(status: int | None) -> bool:
+    """无状态码是传输错误。4xx 里只有 429 重试。"""
+    if status is None:
+        return True
+    return status == 429 or status >= 500
+
+
+def _json_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "model": settings.deepseek_model,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+    }
+
+
+def _parse_json_choice(data: dict[str, Any], model_cls: type[T]):
+    """返回 (模型, content, kind, detail)。kind 为 ok / shape / json / schema。"""
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None, "", "shape", "unexpected response shape"
+    if not isinstance(content, str):
+        return None, "", "shape", "content is not a string"
+    try:
+        parsed = json.loads(content)
+    except (TypeError, json.JSONDecodeError) as exc:
+        return None, content, "json", str(exc)
+    try:
+        return model_cls.model_validate(parsed), content, "ok", ""
+    except ValidationError as exc:
+        return None, content, "schema", str(exc.errors()[:3])
 
 
 llm_client = LLMClient()

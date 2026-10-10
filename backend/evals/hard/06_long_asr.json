@@ -1,0 +1,12 @@
+{
+  "id": "long_asr",
+  "source_text": "会议目标：故障复盘\n周婷：大家好先闲聊两句。孙磊：登录接口超时要在周三修复完成。周婷：今天天气不错。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {"title_keywords": ["登录"], "primary_owner": "孙磊", "secondary_owners": []}
+    ]
+  },
+  "gold": {"clarify": "", "assignments": []}
+}

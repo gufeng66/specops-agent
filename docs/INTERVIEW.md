@@ -1,5 +1,7 @@
 # SpecOps Agent — 面试说明
 
+决策记录：[证据子串](adr/0001-evidence-substring.md)、[建议不等于写入](adr/0002-suggestions-are-not-writes.md)、[工具循环刹车](adr/0003-tool-loop-brakes.md)、[无 Key 走规则](adr/0004-rules-without-key.md)、[checkpoint 与幂等](adr/0005-checkpoint-and-idempotency.md)、[黄金集不是模型效果](adr/0006-golden-is-not-model-quality.md)、[观测是旁路默认关闭](adr/0007-langfuse-sidecar-tracing.md)。
+
 ## 项目一句话
 
 把中文会议对话变成「带原文证据的任务清单」，并拆出每项任务的**主责 / 次责**。原文确认不了负责人时必须人工分配，规则路径禁止填写「待指定」。
@@ -47,6 +49,8 @@ HTTP 层暂停状态统一为 `AWAITING_REVIEW`，前端靠 `interrupt.type` 区
 - HITL 触发与 `needs_clarify` / `needs_assignment` 一致 = **100%**
 
 黄金集是 **规则路径回归**，不代表 LLM 抽取效果。`assign_04.json` 为单独提交的代词 case，不走 `generate_cases` 模板。
+
+`evals/hard/` 是手写脏数据。三档（rules / 规则+LLM / 仅 LLM）打的是规则修复之后的底稿，不是最终人工分配结果。召回、精确率、证据有效率、负责人幻觉率共用这份列表；幻觉率对照的是补干系人名单之前的 stakeholders。下限在 `evals/hard_expected.json`，响应在 `evals/cassettes/`。重录 cassette 不会改下限。CI 用 respx 按完整 user 文本的 hash 回放，不打真 API，也不回放 validate_repair 的工具循环。复姓和弱动词在规则路径只上报数字，不把漏检写成失败。
 
 前端 Demo 按钮为 **案例1 / 案例2 / 案例3**（陈述句纪要，无「参会人：」清单，句首不写「人名：」）。案例3 含「这个跟进交给她负责」，应进入 `assign_owners`。
 

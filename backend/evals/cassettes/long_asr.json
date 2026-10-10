@@ -1,0 +1,21 @@
+{
+  "prompt_version": "2026-10-07",
+  "entries": {
+    "a43d8f49e26e012da2364711015c2afcd21ba580d461b55d31248cb835bff757": {
+      "role": "assistant",
+      "content": "{\"brief\": {\"goal\": \"故障复盘\", \"stakeholders\": [\"周婷\", \"孙磊\"], \"meeting_date\": \"\", \"context\": \"故障复盘\"}}"
+    },
+    "3d7512a2dcb067922997bc68f9fe18d66fbc5fdc3af3d028c229ab426dc72e3d": {
+      "role": "assistant",
+      "content": "{\"items\": [{\"title\": \"修复登录接口\", \"description\": \"修复登录接口\", \"primary_owner\": \"孙磊\", \"secondary_owners\": [], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"孙磊：登录接口超时要在周三修复完成。\", \"inference_reason\": \"\", \"unresolved_ref\": \"\", \"priority\": \"medium\"}]}"
+    },
+    "9aa8d50f740ab229d51642b7a8b066834a9e750566682caf7f79218f05ccf73c": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    },
+    "26d43323adcdde22fc23e842c7862d5758d67d9ad4cd17536ccbf20d8e4f7411": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    }
+  }
+}

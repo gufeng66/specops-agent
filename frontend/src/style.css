@@ -11,6 +11,7 @@
 }
 
 :root {
+  color-scheme: dark;
   --bg-deep: #0c1117;
   --bg-panel: rgba(18, 24, 32, 0.85);
   --border: rgba(99, 140, 177, 0.2);
@@ -82,11 +83,35 @@ textarea, input, select {
   font-size: 0.9rem;
 }
 
-textarea { min-height: 140px; resize: vertical; }
+textarea {
+  min-height: 140px;
+  max-height: 62vh;
+  overflow-y: auto;
+  resize: vertical;
+  scrollbar-gutter: stable;
+}
+
+@supports (field-sizing: content) {
+  textarea { field-sizing: content; resize: none; }
+}
+
+textarea::-webkit-resizer {
+  background: linear-gradient(135deg, transparent 0 55%, var(--text-muted) 55% 66%, transparent 66% 100%);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 textarea:focus, input:focus, select:focus {
-  outline: none;
   border-color: var(--accent);
+}
+
+textarea:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px rgba(61, 139, 253, 0.35);
 }
 
 .card {
@@ -114,6 +139,10 @@ textarea:focus, input:focus, select:focus {
 
 .mono { font-family: var(--mono); font-size: 0.8rem; }
 
-@media (max-width: 768px) {
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; }
+}
+
+@media (max-width: 1024px) {
   .grid-2 { grid-template-columns: 1fr !important; }
 }

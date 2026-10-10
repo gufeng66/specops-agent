@@ -1,0 +1,17 @@
+{
+  "id": "weak_verb",
+  "source_text": "会议目标：版本检查\n周婷：认证模块这周也得有人看一下。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": true,
+    "items": [
+      {"title_keywords": ["认证"], "primary_owner": "", "secondary_owners": []}
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": [
+      {"title_keywords": ["认证"], "primary_owner": "周婷", "secondary_owners": []}
+    ]
+  }
+}

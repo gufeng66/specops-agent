@@ -1,6 +1,6 @@
 # SpecOps Agent — Backend
 
-LangGraph 真实运行时 + FastAPI SSE 薄壳。详见根目录 [README.md](../README.md) 与 [docs/INTERVIEW.md](../docs/INTERVIEW.md)。
+LangGraph 运行时 + FastAPI SSE。详见根目录 [README.md](../README.md) 与 [docs/INTERVIEW.md](../docs/INTERVIEW.md)。
 
 ## 拓扑
 
@@ -15,17 +15,17 @@ LangGraph 真实运行时 + FastAPI SSE 薄壳。详见根目录 [README.md](../
 ## 启动
 
 ```powershell
-pip install -e ".[agent,dev]"
+uv sync --extra dev
 copy .env.example .env
-uvicorn app.main:app --reload --port 8001
+uv run uvicorn app.main:app --reload --port 8001
 ```
 
 ## 测试
 
 ```powershell
-pytest
-ruff check app tests evals
-python -m evals.generate_cases
+uv run pytest
+uv run ruff check app tests evals
+uv run python -m evals.generate_cases
 ```
 
-评测必须 `LLM_PROVIDER=none`。Mock LLM 用例见 `tests/test_workflow.py`（respx）。
+评测必须 `LLM_PROVIDER=none`。Mock LLM 用例见 `tests/test_workflow.py`（respx）。真 API 报告：`uv run python -m evals.report`（不改 cassette）。

@@ -183,8 +183,11 @@ class ThreadSnapshot(BaseModel):
     interrupt_payload: dict | None = None
     review: ReviewInfo = Field(default_factory=ReviewInfo)
     markdown_output: str = ""
-    sync_status: str = "not_synced"  # 演示字段，不会真实写入 Jira/飞书
+    token_in: int = 0
+    token_out: int = 0
+    latency_ms: int = 0
     graph_ns: str = ""  # checkpointer 线程键，HITL resume 必须稳定
+    prompt_version: str = ""
     created_at: str = ""
     updated_at: str = ""
 

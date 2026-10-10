@@ -125,7 +125,7 @@ function unassigned(): BoardItem[] {
 .quote { font-size: 0.75rem; color: var(--text-muted); }
 .role-tag {
   display: inline-block;
-  font-size: 0.68rem;
+  font-size: 0.75rem;
   font-weight: 700;
   padding: 0.15rem 0.4rem;
   border-radius: 4px;

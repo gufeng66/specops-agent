@@ -1,0 +1,17 @@
+{
+  "prompt_version": "2026-10-07",
+  "entries": {
+    "65f9d8093692d7480dde5e5299ca9f2e9646972439a2e0f5c0e885eb5f93b5e8": {
+      "role": "assistant",
+      "content": "{\"brief\": {\"goal\": \"周会\", \"stakeholders\": [\"周婷\", \"孙磊\"], \"meeting_date\": \"\", \"context\": \"周会\"}}"
+    },
+    "25e23ff6326cfb872a2e3d6d1c4e0d0f1c190025cf4337cddce5b82553104694": {
+      "role": "assistant",
+      "content": "{\"items\": []}"
+    },
+    "35af86ebccfc3c5345a60c2e77e998d1ccb352344ea9ea972c52dafd3d8669ac": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    }
+  }
+}

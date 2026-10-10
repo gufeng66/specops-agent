@@ -1,0 +1,25 @@
+{
+  "prompt_version": "2026-10-07",
+  "entries": {
+    "7f1f28d94db05235946e5545cfb53a683463647b2ace75b7b41b10806fd2e95b": {
+      "role": "assistant",
+      "content": "{\"brief\": {\"goal\": \"排期\", \"stakeholders\": [\"周婷\", \"孙磊\"], \"meeting_date\": \"\", \"context\": \"排期\"}}"
+    },
+    "71cc00ca2172116e8917427b71a5c5e15b7b6a8031649520be35c307cfcd6d00": {
+      "role": "assistant",
+      "content": "{\"items\": [{\"title\": \"完成迁移方案\", \"description\": \"完成迁移方案\", \"primary_owner\": \"周婷\", \"secondary_owners\": [], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"周婷：我负责完成迁移方案，下周一交付。\", \"inference_reason\": \"\", \"unresolved_ref\": \"\", \"priority\": \"medium\"}, {\"title\": \"核对清单\", \"description\": \"核对清单\", \"primary_owner\": \"周婷\", \"secondary_owners\": [\"孙磊\"], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"孙磊：配合周婷核对清单。\", \"inference_reason\": \"\", \"unresolved_ref\": \"\", \"priority\": \"medium\"}]}"
+    },
+    "2a4995e8706813a9610fdf74f7a4c7142366683599a80ecd986f96978928b7c3": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    },
+    "c8ddd9c39b68c3c2040cb36f8df53c86e72d3dad24bbfcdd5037f73bfd67442a": {
+      "role": "assistant",
+      "content": "{\"items\": [{\"title\": \"完成迁移方案\", \"description\": \"完成迁移方案\", \"primary_owner\": \"周婷\", \"secondary_owners\": [], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"周婷：我负责完成迁移方案，下周一交付。\", \"inference_reason\": \"\", \"unresolved_ref\": \"\", \"priority\": \"medium\"}, {\"title\": \"核对清单\", \"description\": \"核对清单\", \"primary_owner\": \"周婷\", \"secondary_owners\": [\"孙磊\"], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"孙磊：配合周婷核对清单。\", \"inference_reason\": \"\", \"unresolved_ref\": \"\", \"priority\": \"medium\"}]}"
+    },
+    "5c42d0535dfaaa6dcd3e93cb3f33c1254b6c0c333f478ede46cb73a30bccffb7": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    }
+  }
+}

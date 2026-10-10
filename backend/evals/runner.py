@@ -1,4 +1,4 @@
-"""规则路径评测 runner。检测到 LLM Key 直接失败，避免污染黄金集门槛。
+"""评测 runner。rules 拒绝已启用的 LLM；llm / llm_only 要求客户端已启用。
 
 seen 记录的是 interrupt 类型（clarify/assign_owners/review），不是 SSE 节点名；
 propose_owners 不停图，因此不影响 HITL 一致性统计。
@@ -15,11 +15,12 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.agent.graph import build_graph
 from app.agent.workflow import SpecOpsWorkflow
-from app.domain.models import ThreadSnapshot
+from app.domain.models import ActionItem, ThreadSnapshot
 from app.llm.client import llm_client
 from app.memory.store import MemoryStore
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
+HARD_DIR = Path(__file__).resolve().parent / "hard"
 MAX_STEPS = 12
 KNOWN_INTERRUPTS = {"clarify", "assign_owners", "review"}
 
@@ -31,8 +32,17 @@ class EvalError(RuntimeError):
 
 def load_cases() -> list[dict[str, Any]]:
     """读取 golden/*.json。文件名顺序即评测顺序。"""
+    return _load_dir(GOLDEN_DIR)
+
+
+def load_hard_cases() -> list[dict[str, Any]]:
+    """读取 hard/*.json。不进黄金集门槛。"""
+    return _load_dir(HARD_DIR)
+
+
+def _load_dir(directory: Path) -> list[dict[str, Any]]:
     cases = []
-    for path in sorted(GOLDEN_DIR.glob("*.json")):
+    for path in sorted(directory.glob("*.json")):
         cases.append(json.loads(path.read_text(encoding="utf-8")))
     return cases
 
@@ -79,10 +89,21 @@ def _assignments_for(snap: ThreadSnapshot, case: dict[str, Any]) -> list[dict[st
     return out
 
 
-async def run_case(case: dict[str, Any], tmp_dir: Path) -> dict[str, Any]:
-    """独立 MemorySaver + SQLite，自动 resume 黄金答复。有 Key 直接失败。"""
-    if llm_client.enabled:
-        raise EvalError("llm_client.enabled is True; refuse to pollute frozen eval")
+async def run_case(
+    case: dict[str, Any],
+    tmp_dir: Path,
+    *,
+    mode: str = "rules",
+) -> dict[str, Any]:
+    """独立 MemorySaver + SQLite，自动 resume 黄金答复。"""
+    if mode == "rules":
+        if llm_client.enabled:
+            raise EvalError("llm_client.enabled is True; refuse to pollute frozen eval")
+    elif mode in ("llm", "llm_only"):
+        if not llm_client.enabled:
+            raise EvalError(f"{mode} requires an enabled llm client")
+    else:
+        raise EvalError(f"unknown eval mode {mode}")
 
     case_id = str(case.get("id") or uuid4())
     store = MemoryStore(str(tmp_dir / f"{case_id}.db"))
@@ -94,7 +115,9 @@ async def run_case(case: dict[str, Any], tmp_dir: Path) -> dict[str, Any]:
     snap.graph_ns = graph_ns
 
     seen: list[str] = []
-    async for _ in wf.run_chat(snap, case["source_text"], f"{case_id}-0"):
+    async for _ in wf.run_chat(
+        snap, case["source_text"], f"{case_id}-0", eval_mode=mode
+    ):
         pass
 
     for step in range(MAX_STEPS):
@@ -103,13 +126,13 @@ async def run_case(case: dict[str, Any], tmp_dir: Path) -> dict[str, Any]:
         if snap.markdown_output and not (
             snap.interrupt_payload and snap.status.value == "awaiting_review"
         ):
-            return {"snapshot": snap, "seen": seen, "steps": step}
+            return await _pack(graph, snap.graph_ns, snap, seen, step)
 
         payload = snap.interrupt_payload or {}
         itype = str(payload.get("type") or "")
         if not itype:
             if snap.markdown_output:
-                return {"snapshot": snap, "seen": seen, "steps": step}
+                return await _pack(graph, snap.graph_ns, snap, seen, step)
             raise EvalError(f"{case_id}: stopped without interrupt or markdown")
         if itype not in KNOWN_INTERRUPTS:
             raise EvalError(f"{case_id}: unknown interrupt type {itype}")
@@ -117,7 +140,9 @@ async def run_case(case: dict[str, Any], tmp_dir: Path) -> dict[str, Any]:
 
         if itype == "clarify":
             text = str((case.get("gold") or {}).get("clarify") or "补充会议目标")
-            async for _ in wf.run_chat(snap, snap.source_text, f"{case_id}-c{step}", clarify_response=text):
+            async for _ in wf.run_chat(
+                snap, snap.source_text, f"{case_id}-c{step}", clarify_response=text, eval_mode=mode
+            ):
                 pass
             continue
         if itype == "assign_owners":
@@ -134,3 +159,22 @@ async def run_case(case: dict[str, Any], tmp_dir: Path) -> dict[str, Any]:
             continue
 
     raise EvalError(f"{case_id}: exceeded interrupt cap {MAX_STEPS}")
+
+
+async def _pack(graph, graph_ns: str, snap: ThreadSnapshot, seen: list[str], step: int) -> dict[str, Any]:
+    """修复后的底稿在 eval_scored_items；干系人名单在补全之前。"""
+    graph_state = await graph.aget_state({"configurable": {"thread_id": graph_ns}})
+    values = dict(getattr(graph_state, "values", None) or {})
+    raw_items = values.get("eval_scored_items")
+    if raw_items is None:
+        scored = list(snap.task_draft.items)
+    else:
+        scored = [ActionItem.model_validate(item) for item in raw_items]
+    return {
+        "snapshot": snap,
+        "seen": seen,
+        "steps": step,
+        "scored_items": scored,
+        "stakeholders": list(values.get("eval_pre_enrich_stakeholders") or []),
+        "prompt_version": snap.prompt_version,
+    }

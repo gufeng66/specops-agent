@@ -6,7 +6,7 @@
  * confidence 只显示低/中/高，不预填下拉、不按分数自动选。
  * PIPELINE_IDS 必须含 propose_owners，否则 skipped 写不进步进条。
  */
-import { ref, computed, reactive, nextTick } from 'vue'
+import { ref, computed, reactive, nextTick, watch, onUnmounted } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import Pipeline, { type NodeStatus } from './Pipeline.vue'
@@ -81,6 +81,7 @@ const HITL_NODES = new Set(['review', 'assign_owners', 'clarify'])
 function resetPipeline() {
   // 每次新开跑把八点都打回 pending，避免上次 skipped 残留
   for (const id of PIPELINE_IDS) nodeStatus[id] = 'pending'
+  for (const key of Object.keys(assignDrafts)) delete assignDrafts[key]
 }
 
 function stepKind(node: string): string {
@@ -131,16 +132,23 @@ const reviseFeedback = ref('')
 const showReviseForm = ref(false)
 const loading = ref(false)
 const errorMsg = ref('')
+const notice = ref('')
 const threadId = ref<string | null>(null)
-const sourceBox = ref<HTMLTextAreaElement | null>(null)
 const locateHint = ref('')
+const expand = ref(false)
+const sourceMode = ref<'edit' | 'read'>('edit')
+const quoteRange = ref<{ start: number; end: number } | null>(null)
+const sourceRead = ref<HTMLElement | null>(null)
+const progressListEl = ref<HTMLElement | null>(null)
+let runSeq = 0
+let abortCtrl: AbortController | null = null
 const SOFT_LIMIT = 8000
 const HARD_LIMIT = 100000
 
-const demoSamples = [
-  { name: '案例1', path: '/samples/demo_sprint_planning.txt' },
-  { name: '案例2', path: '/samples/demo_incident_review.txt' },
-  { name: '案例3', path: '/samples/demo_feature_review.txt' },
+const sampleButtons = [
+  { name: '示例1', path: '/samples/demo_sprint_planning.txt' },
+  { name: '示例2', path: '/samples/demo_incident_review.txt' },
+  { name: '示例3', path: '/samples/demo_feature_review.txt' },
 ]
 
 const taskItems = computed(() => snapshot.value?.task_draft?.items ?? [])
@@ -160,6 +168,15 @@ const markdownHtml = computed(() => {
 })
 const assignItems = computed(() => (interrupt.value?.items as Array<Record<string, unknown>>) ?? [])
 const reviewItems = computed(() => (interrupt.value?.items as Array<Record<string, unknown>>) ?? [])
+
+function effectivePrimary(item: { id?: unknown; primary_owner?: unknown }) {
+  const id = String(item.id || '')
+  return assignDrafts[id]?.primary_owner || String(item.primary_owner || '')
+}
+
+const reviewPendingPrimary = computed(() =>
+  reviewItems.value.filter(item => !effectivePrimary(item).trim()).length,
+)
 const assignStakeholders = computed(
   () => (interrupt.value?.stakeholders as string[] | undefined) ?? stakeholders.value,
 )
@@ -252,28 +269,65 @@ async function loadSample(path: string) {
   }
 }
 
-const sseHandlers = {
-  // interrupt 把对应节点标 waiting；分配时只 seed 本地草稿，不改 snapshot 主责
-  onMetadata: (d: Record<string, unknown>) => {
-    if (d.thread_id) threadId.value = d.thread_id as string
-  },
-  onProgress: (d: { node: string; message: string; status?: string }) => pushProgress(d),
-  onToolResult: (d: Record<string, unknown>) => { toolLog.value.push(d) },
-  onInterrupt: (d: Record<string, unknown>) => {
-    interrupt.value = d
-    const t = String(d.type || '')
-    if (PIPELINE_IDS.includes(t)) nodeStatus[t] = 'waiting'
-    if (t === 'assign_owners' || t === 'review') seedAssignDrafts(d)
-  },
-  onResult: (d: Record<string, unknown>) => { snapshot.value = d as unknown as Snapshot },
-  onError: (d: { message: string }) => { errorMsg.value = d.message },
-  onDone: () => { loading.value = false },
+function makeHandlers(mine: () => boolean) {
+  // 每个入口自己的闭包。旧流迟到回调看到代次不对就丢掉，避免关掉新一次的 loading。
+  return {
+    onMetadata: (d: Record<string, unknown>) => {
+      if (!mine()) return
+      if (d.thread_id) threadId.value = d.thread_id as string
+    },
+    onProgress: (d: { node: string; message: string; status?: string }) => {
+      if (!mine()) return
+      pushProgress(d)
+    },
+    onToolResult: (d: Record<string, unknown>) => {
+      if (!mine()) return
+      toolLog.value.push(d)
+    },
+    onInterrupt: (d: Record<string, unknown>) => {
+      if (!mine()) return
+      interrupt.value = d
+      const t = String(d.type || '')
+      if (PIPELINE_IDS.includes(t)) nodeStatus[t] = 'waiting'
+      if (t === 'assign_owners' || t === 'review') seedAssignDrafts(d)
+    },
+    onResult: (d: Record<string, unknown>) => {
+      if (!mine()) return
+      snapshot.value = d as unknown as Snapshot
+    },
+    onError: (d: { message: string }) => {
+      if (!mine()) return
+      errorMsg.value = d.message
+    },
+    onDone: () => {
+      if (!mine()) return
+      loading.value = false
+    },
+  }
+}
+
+function startControlledRun() {
+  const seq = ++runSeq
+  abortCtrl?.abort()
+  const ctrl = new AbortController()
+  abortCtrl = ctrl
+  return { mine: () => seq === runSeq, signal: ctrl.signal }
+}
+
+function cancelRun() {
+  ++runSeq
+  abortCtrl?.abort()
+  abortCtrl = null
+  loading.value = false
+  notice.value = '已取消本次分析'
 }
 
 async function runWorkflow(clarify?: string) {
   // 澄清走 /chat/stream 而不是 /resume，因为 clarify interrupt 绑在同一 graph_ns
+  const { mine, signal } = startControlledRun()
   loading.value = true
   errorMsg.value = ''
+  notice.value = ''
   progressLog.value = []
   toolLog.value = []
   interrupt.value = null
@@ -289,19 +343,21 @@ async function runWorkflow(clarify?: string) {
       thread_id: threadId.value,
       request_id: uuid(),
       clarify_response: clarify || null,
-    }, sseHandlers)
+    }, makeHandlers(mine), signal)
   } catch (err) {
-    errorMsg.value = err instanceof Error ? err.message : '请求失败'
+    if (mine()) errorMsg.value = err instanceof Error ? err.message : '请求失败'
   } finally {
-    loading.value = false
+    if (mine()) loading.value = false
   }
 }
 
 async function resume(approve = false) {
   // 分配必须带 assignments 且 approve=false，避免误走「一键批准」分支
   if (!snapshot.value?.run_id) return
+  const { mine, signal } = startControlledRun()
   loading.value = true
   errorMsg.value = ''
+  notice.value = ''
   const type = String(interrupt.value?.type || 'review')
   interrupt.value = null
   showReviseForm.value = false
@@ -327,19 +383,21 @@ async function resume(approve = false) {
   }
 
   try {
-    await streamSSE(`/api/v1/runs/${snapshot.value.run_id}/resume`, body, sseHandlers)
+    await streamSSE(`/api/v1/runs/${snapshot.value.run_id}/resume`, body, makeHandlers(mine), signal)
   } catch (err) {
-    errorMsg.value = err instanceof Error ? err.message : '请求失败'
+    if (mine()) errorMsg.value = err instanceof Error ? err.message : '请求失败'
   } finally {
-    loading.value = false
+    if (mine()) loading.value = false
   }
 }
 
 async function resumeDrop(itemId: string) {
   // 审核面板「不是任务」：显式 drop，不依赖自然语言解析
   if (!snapshot.value?.run_id) return
+  const { mine, signal } = startControlledRun()
   loading.value = true
   errorMsg.value = ''
+  notice.value = ''
   interrupt.value = null
   showReviseForm.value = false
   try {
@@ -353,12 +411,13 @@ async function resumeDrop(itemId: string) {
         drop_item_ids: [itemId],
         feedback: '',
       },
-      sseHandlers,
+      makeHandlers(mine),
+      signal,
     )
   } catch (err) {
-    errorMsg.value = err instanceof Error ? err.message : '请求失败'
+    if (mine()) errorMsg.value = err instanceof Error ? err.message : '请求失败'
   } finally {
-    loading.value = false
+    if (mine()) loading.value = false
   }
 }
 
@@ -409,35 +468,39 @@ function findQuoteRange(haystack: string, item: BoardItem): { start: number; end
   return null
 }
 
-function scrollTextareaTo(el: HTMLTextAreaElement, index: number) {
-  const style = window.getComputedStyle(el)
-  const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5 || 21
-  const linesBefore = el.value.slice(0, index).split('\n').length - 1
-  const paddingTop = parseFloat(style.paddingTop) || 0
-  el.scrollTop = Math.max(0, linesBefore * lineHeight - el.clientHeight / 3 + paddingTop)
-}
+const quoteParts = computed(() => {
+  const range = quoteRange.value
+  if (!range) return null
+  const text = sourceText.value
+  return {
+    before: text.slice(0, range.start),
+    hit: text.slice(range.start, range.end),
+    after: text.slice(range.end),
+  }
+})
 
 async function locateInSource(item: BoardItem) {
-  // 选中 textarea 对应句子。下拉框仍聚焦时不要抢焦点
+  // 切到只读层用 <mark> 定位，不 focus textarea，所以不用 suppressLocate。
+  // 不要改回叠在 textarea 上的高亮层：两套视图不对齐就不存在像素错位。
   locateHint.value = ''
   const range = findQuoteRange(sourceText.value, item)
   if (!range) {
+    quoteRange.value = null
     locateHint.value =
       (item as ActionItem).evidence_kind === 'inference'
         ? '该项是推断任务，原文没有可定位的连续引用'
         : '未在当前原文中找到对应引用'
     return
   }
+  quoteRange.value = range
+  sourceMode.value = 'read'
   await nextTick()
-  const el = sourceBox.value
-  if (!el) return
-  const active = document.activeElement
-  if (active instanceof HTMLElement && active.closest('.assign-controls, select')) {
-    return
-  }
-  el.focus()
-  el.setSelectionRange(range.start, range.end)
-  scrollTextareaTo(el, range.start)
+  await nextTick()
+  sourceRead.value?.querySelector('mark')?.scrollIntoView({ block: 'center' })
+}
+
+function editSource() {
+  sourceMode.value = 'edit'
 }
 
 function selectItemForRevise(item: BoardItem) {
@@ -445,12 +508,6 @@ function selectItemForRevise(item: BoardItem) {
   reviseScope.value = 'item'
   showReviseForm.value = true
   void locateInSource(item)
-}
-
-let suppressLocateUntil = 0
-
-function suppressLocate(ms = 400) {
-  suppressLocateUntil = Date.now() + ms
 }
 
 function isHitlInteractiveTarget(target: EventTarget | null): boolean {
@@ -463,16 +520,37 @@ function isHitlInteractiveTarget(target: EventTarget | null): boolean {
 function locateHitlItem(raw: Record<string, unknown>, ev?: Event) {
   // 只有点标题区才定位；select/button 点击会被吞掉，避免抢走下拉焦点
   if (isHitlInteractiveTarget(ev?.target ?? null)) return
-  if (Date.now() < suppressLocateUntil) return
   const item = asBoardItem(raw)
   reviseItemId.value = item.id
   void locateInSource(item)
 }
 
-function onPrimaryOwnerPick() {
-  // option 点击可能穿透到标题区，短窗口内禁止 locate
-  suppressLocate()
+function onEsc(e: KeyboardEvent) {
+  if (e.key === 'Escape' && expand.value) expand.value = false
 }
+
+watch(expand, (on) => {
+  document.body.style.overflow = on ? 'hidden' : ''
+  if (on) window.addEventListener('keydown', onEsc)
+  else window.removeEventListener('keydown', onEsc)
+})
+
+watch(() => progressLog.value.length + toolLog.value.length, async () => {
+  const el = progressListEl.value
+  if (!el || el.clientHeight === 0) return
+  const near = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+  if (!near) return
+  await nextTick()
+  const box = progressListEl.value
+  if (!box || box.clientHeight === 0) return
+  box.scrollTop = box.scrollHeight
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onEsc)
+  document.body.style.overflow = ''
+  abortCtrl?.abort()
+})
 
 resetPipeline()
 </script>
@@ -495,15 +573,31 @@ resetPipeline()
         <div class="card">
           <h2>会议对话</h2>
           <div class="sample-row">
-            <button v-for="s in demoSamples" :key="s.name" class="btn-ghost" @click="loadSample(s.path)">
+            <button v-for="s in sampleButtons" :key="s.name" class="btn-ghost" @click="loadSample(s.path)">
               {{ s.name }}
             </button>
           </div>
-          <textarea
-            ref="sourceBox"
-            v-model="sourceText"
-            placeholder="粘贴会议对话，或加载上方示例..."
-          />
+          <!-- 只读层与 textarea 切换，不要叠成高亮层：不对齐就没有像素错位 -->
+          <!-- Teleport：.card 的 backdrop-filter 会把 fixed 困在卡片里 -->
+          <Teleport to="body" :disabled="!expand">
+          <div class="source-wrap" :class="{ expanded: expand }">
+            <textarea
+              v-show="sourceMode === 'edit'"
+              v-model="sourceText"
+              placeholder="粘贴会议对话，或加载上方示例..."
+            />
+            <div v-show="sourceMode === 'read'" ref="sourceRead" class="source-read">
+              <template v-if="quoteParts">{{ quoteParts.before }}<mark>{{ quoteParts.hit }}</mark>{{ quoteParts.after }}</template>
+              <template v-else>{{ sourceText }}</template>
+            </div>
+            <div class="source-toolbar">
+              <button v-if="sourceMode === 'read'" class="btn-ghost" type="button" @click="editSource">编辑</button>
+              <button class="btn-ghost" type="button" @click="expand = !expand">
+                {{ expand ? '收起' : '放大编辑' }}
+              </button>
+            </div>
+          </div>
+          </Teleport>
           <p class="text-muted char-count">
             {{ sourceText.length }} 字
             <span v-if="sourceText.length > SOFT_LIMIT && sourceText.length <= HARD_LIMIT"> · 将分块抽取，耗时更长</span>
@@ -518,31 +612,37 @@ resetPipeline()
             >
               {{ loading ? '处理中...' : '开始分析' }}
             </button>
+            <button v-if="loading" class="btn-ghost" type="button" @click="cancelRun">取消</button>
           </div>
+          <p v-if="loading || notice" class="text-muted cancel-note">
+            {{ notice || '取消只停止本页接收，后端仍在跑，立刻再开始可能提示线程忙碌。' }}
+          </p>
         </div>
 
-        <div v-if="progressLog.length" class="card">
-          <h3>执行时间线</h3>
-          <ul class="progress-list">
-            <li v-for="(p, i) in progressLog" :key="i">
-              <span class="badge" :class="'kind-' + (p.kind || 'step')">{{ p.kind || 'step' }}</span>
-              <span class="badge">{{ p.node }}</span>
-              <span v-if="p.status" class="badge">{{ p.status }}</span>
-              <span v-if="p.route" class="badge route-badge" :class="routeBadgeClass(p.route)">{{ p.route }}</span>
-              {{ p.message }}
-            </li>
-          </ul>
-          <ul v-if="toolLog.length" class="progress-list tool-list">
-            <li v-for="(t, i) in toolLog" :key="'t'+i">
-              <span class="badge kind-tool">tool</span>
-              <span class="mono">{{ t.tool }}</span>
-            </li>
-          </ul>
-        </div>
+        <details v-if="progressLog.length" class="card timeline" open>
+          <summary>执行时间线</summary>
+          <div ref="progressListEl" class="progress-list">
+            <ul>
+              <li v-for="(p, i) in progressLog" :key="i">
+                <span class="badge" :class="'kind-' + (p.kind || 'step')">{{ p.kind || 'step' }}</span>
+                <span class="badge">{{ p.node }}</span>
+                <span v-if="p.status" class="badge">{{ p.status }}</span>
+                <span v-if="p.route" class="badge route-badge" :class="routeBadgeClass(p.route)">{{ p.route }}</span>
+                {{ p.message }}
+              </li>
+            </ul>
+            <ul v-if="toolLog.length" class="tool-list">
+              <li v-for="(t, i) in toolLog" :key="'t'+i">
+                <span class="badge kind-tool">tool</span>
+                <span class="mono">{{ t.tool }}</span>
+              </li>
+            </ul>
+          </div>
+        </details>
       </section>
 
       <section class="col-output">
-        <div v-if="interrupt?.type === 'clarify'" class="card hitl-panel hitl-clarify">
+        <div v-if="interrupt?.type === 'clarify'" class="card hitl-panel hitl-clarify span-2">
           <!-- 澄清走 runWorkflow(clarifyInput)，不是 /resume -->
           <div class="hitl-header">
             <span class="hitl-tag tag-clarify">澄清</span>
@@ -557,7 +657,7 @@ resetPipeline()
           </div>
         </div>
 
-        <div v-if="interrupt?.type === 'assign_owners'" class="card hitl-panel hitl-assign">
+        <div v-if="interrupt?.type === 'assign_owners'" class="card hitl-panel hitl-assign span-2">
           <!-- 建议芯片只改 assignDrafts；提交后才 resume。整行不要 @click 定位 -->
           <div class="hitl-header">
             <span class="hitl-tag tag-assign">分配负责人</span>
@@ -582,7 +682,6 @@ resetPipeline()
               v-model="assignDrafts[String(item.id)].primary_owner"
               @mousedown.stop
               @click.stop
-              @change="onPrimaryOwnerPick"
             >
               <option value="">请选择</option>
               <option v-for="name in assignStakeholders" :key="name" :value="name">
@@ -628,7 +727,7 @@ resetPipeline()
             </div>
             </div>
           </div>
-          <div class="actions">
+          <div class="hitl-primary-actions">
             <button class="btn-ghost" :disabled="loading || !canAdoptAll" @click="adoptAllSuggestions">
               采纳全部
             </button>
@@ -636,14 +735,14 @@ resetPipeline()
           </div>
         </div>
 
-        <div v-if="interrupt?.type === 'review'" class="card hitl-panel hitl-review">
+        <div v-if="interrupt?.type === 'review'" class="card hitl-panel hitl-review span-2">
           <!-- 默认一键批准；删除用全局序号或 UUID，不要用看板上的「某人第 N 条」 -->
           <div class="hitl-header">
             <span class="hitl-tag tag-review">人工审核</span>
             <h3>审核任务清单</h3>
           </div>
           <p class="hitl-msg">{{ interrupt.message }}</p>
-          <p class="text-muted locate-help">点击下方任务可在左侧原文中定位。序号为全局顺序，删除请用「第 N 条」。当前 {{ reviewItems.length }} 条。</p>
+          <p class="text-muted locate-help">点击下方任务可在左侧原文中定位。序号为全局顺序，删除请用「第 N 条」。共 {{ reviewItems.length }} 条 · 主责待确认 {{ reviewPendingPrimary }} 条。</p>
           <div
             v-for="item in reviewItems"
             :key="String(item.id)"
@@ -659,7 +758,7 @@ resetPipeline()
                 @click.stop="resumeDrop(String(item.id))"
               >删除</button>
             </div>
-            <p class="text-muted">主责：{{ item.primary_owner || '—' }}</p>
+            <p class="text-muted">主责：{{ effectivePrimary(item) || '—' }}</p>
             <p class="text-muted">
               次责：{{
                 (assignDrafts[String(item.id)]?.secondary_owners.length
@@ -721,7 +820,7 @@ resetPipeline()
           </div>
         </div>
 
-        <div v-if="errorMsg" class="card error-card">
+        <div v-if="errorMsg" class="card error-card span-2">
           <p>{{ errorMsg }}</p>
         </div>
 
@@ -733,7 +832,7 @@ resetPipeline()
           <p v-if="snapshot.idempotent"><span class="badge badge-warn">幂等返回</span></p>
         </div>
 
-        <div v-if="taskItems.length" class="card">
+        <div v-if="taskItems.length" class="card span-2">
           <h3>按人任务 <span class="badge">{{ taskItems.length }}</span></h3>
           <TaskBoard :items="taskItems" :selected-id="reviseItemId" @select="selectItemForRevise" />
         </div>
@@ -746,7 +845,7 @@ resetPipeline()
           </ul>
         </div>
 
-        <div v-if="markdownPreview" class="card">
+        <div v-if="markdownPreview" class="card span-2">
           <h3>Markdown 预览</h3>
           <div class="actions md-toggle">
             <button class="btn-ghost" :class="{ on: mdView === 'preview' }" @click="mdView = 'preview'">预览</button>
@@ -765,18 +864,74 @@ resetPipeline()
 </template>
 
 <style scoped>
-.app { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+.app { max-width: min(100% - 2.5rem, 1600px); margin: 0 auto; padding: 1.5rem 1.25rem; }
 .header { margin-bottom: 1rem; }
 .header h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; }
 .pipeline-card { margin-bottom: 1.25rem; }
-.main { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+.main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 1.5rem; align-items: start; }
+.col-input { display: flex; flex-direction: column; gap: 1.25rem; }
 .col-output { display: flex; flex-direction: column; gap: 1.25rem; }
 .col-output > .card { margin: 0; }
+@media (min-width: 1500px) {
+  .col-output { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; align-content: start; }
+  .col-output > .span-2 { grid-column: 1 / -1; }
+}
 h2, h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.75rem; }
 .sample-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; align-items: center; }
 .actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
-.progress-list { list-style: none; }
+.progress-list { max-height: 260px; overflow-y: auto; }
+.progress-list ul { list-style: none; }
 .progress-list li { padding: 0.28rem 0; font-size: 0.8rem; display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.timeline summary { font-size: 1rem; font-weight: 600; cursor: pointer; margin-bottom: 0.75rem; }
+.source-wrap { position: relative; }
+.source-wrap textarea { padding-bottom: 2.2rem; }
+.source-read {
+  min-height: 140px;
+  max-height: 62vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-family: var(--font);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 0.65rem 0.85rem 2.2rem;
+  width: 100%;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.source-read mark { background: rgba(255, 176, 32, 0.35); color: inherit; }
+.source-toolbar {
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.6rem;
+  display: flex;
+  gap: 0.35rem;
+}
+.source-toolbar .btn-ghost { font-size: 0.75rem; padding: 0.25rem 0.6rem; }
+.expanded {
+  position: fixed;
+  inset: 5vh 6vw;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #121820;
+  padding: 1rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.expanded textarea,
+.expanded .source-read {
+  flex: 1;
+  field-sizing: fixed;
+  resize: none;
+  max-height: none;
+  min-height: 0;
+  height: auto;
+}
+.expanded .source-toolbar { position: static; margin-top: 0.6rem; align-self: flex-end; }
+.cancel-note { font-size: 0.75rem; margin-top: 0.45rem; }
 .tool-list { margin-top: 0.5rem; border-top: 1px solid var(--border); padding-top: 0.5rem; }
 .kind-model { background: #1e3a5f; }
 .kind-tool { background: #1e4d3a; }
@@ -866,7 +1021,20 @@ ul li { margin-bottom: 0.35rem; font-size: 0.8rem; }
 .tag-assign { background: rgba(52, 199, 89, 0.22); color: var(--success); }
 .hitl-msg { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 0.75rem; }
 .hitl-clarify input { margin: 0.5rem 0; }
-.hitl-primary-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; align-items: center; margin-top: 0.5rem; }
+.hitl-primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  padding: 0.85rem 0 0.4rem;
+  margin-top: 0.75rem;
+  background: linear-gradient(180deg, rgba(18, 24, 32, 0) 0%, rgba(18, 24, 32, 0.94) 35%);
+  backdrop-filter: blur(6px);
+  border-top: 1px solid var(--border);
+}
 .btn-approve {
   font-size: 1rem;
   padding: 0.75rem 1.35rem;
@@ -904,6 +1072,6 @@ ul li { margin-bottom: 0.35rem; font-size: 0.8rem; }
   text-align: left;
 }
 .suggest-chip.on { border-color: var(--accent); color: var(--accent); background: rgba(61, 139, 253, 0.12); }
-.suggest-band { font-size: 0.65rem; color: var(--text-muted); }
+.suggest-band { font-size: 0.75rem; color: var(--text-muted); }
 .suggest-reason { font-size: 0.75rem; margin-top: 0.35rem; }
 </style>

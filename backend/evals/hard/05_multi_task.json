@@ -1,0 +1,13 @@
+{
+  "id": "multi_task",
+  "source_text": "会议目标：收尾\n周婷：我负责写发布说明，周五完成。另外我再核对回滚步骤。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": [
+      {"title_keywords": ["发布说明"], "primary_owner": "周婷", "secondary_owners": []},
+      {"title_keywords": ["回滚"], "primary_owner": "周婷", "secondary_owners": []}
+    ]
+  },
+  "gold": {"clarify": "", "assignments": []}
+}

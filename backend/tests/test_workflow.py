@@ -275,6 +275,12 @@ async def test_full_workflow_none_provider(tmp_path):
     assert len(final.task_draft.items) >= 1
     assert final.graph_ns
     assert all(i.primary_owner for i in final.task_draft.items)
+    from app.llm.client import llm_client
+
+    if not llm_client.enabled:
+        assert final.token_in == 0
+        assert final.token_out == 0
+        assert final.latency_ms == 0
 
 
 @pytest.mark.asyncio

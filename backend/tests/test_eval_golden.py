@@ -26,7 +26,14 @@ async def test_eval_golden(tmp_path):
             result = await run_case(case, tmp_path)
         except EvalError as exc:
             pytest.fail(str(exc))
-        rows.append(score_case(case, result["snapshot"], result["seen"]))
+        rows.append(
+            score_case(
+                case,
+                result["snapshot"],
+                result["seen"],
+                result["snapshot"].task_draft.items,
+            )
+        )
 
     summary = aggregate(rows)
     assert summary["passed"], (

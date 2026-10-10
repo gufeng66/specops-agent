@@ -1,0 +1,17 @@
+{
+  "id": "pronoun",
+  "source_text": "会议目标：跟进安排\n周婷：先把背景说一下。\n孙磊：这个跟进交给她负责，本周内完成。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": true,
+    "items": [
+      {"title_keywords": ["跟进"], "primary_owner": "", "secondary_owners": []}
+    ]
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": [
+      {"title_keywords": ["跟进"], "primary_owner": "周婷", "secondary_owners": []}
+    ]
+  }
+}

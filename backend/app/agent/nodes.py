@@ -77,27 +77,44 @@ def _tool_result(data: dict[str, Any]) -> dict[str, Any]:
     return {"kind": "tool_result", **data}
 
 
+def _eval_mode(state: AgentState) -> str:
+    """评测档位。空字符串表示线上路径。"""
+    return str(state.get("eval_mode") or "")
+
+
 async def intake_node(state: AgentState) -> dict[str, Any]:
     """规则底稿 + 可选 LLM merge。goal 空则下一跳 clarify。"""
     source = state.get("source_text") or ""
     events: list[dict[str, Any]] = []
     chunks = split_source(source, settings.llm_chunk_chars, settings.llm_chunk_overlap)
 
-    brief = rule_extract_brief(source)
-    used = "rules"
-    if llm_client.enabled:
-        llm_brief = await llm_client.structured_extract_brief(source)
-        if llm_brief:
-            if llm_brief.brief.goal:
-                brief.goal = llm_brief.brief.goal
-            for name in llm_brief.brief.stakeholders:
-                if name and name not in brief.stakeholders:
-                    brief.stakeholders.append(name)
-            if llm_brief.brief.meeting_date and not brief.meeting_date:
-                brief.meeting_date = llm_brief.brief.meeting_date
-            if llm_brief.brief.context:
-                brief.context = llm_brief.brief.context
-            used = "deepseek+rules"
+    mode = _eval_mode(state)
+    if mode == "llm_only":
+        brief = MeetingBrief()
+        used = "deepseek"
+        if llm_client.enabled:
+            llm_brief = await llm_client.structured_extract_brief(source)
+            if llm_brief is not None:
+                brief = llm_brief.brief
+    elif mode == "rules":
+        brief = rule_extract_brief(source)
+        used = "rules"
+    else:
+        brief = rule_extract_brief(source)
+        used = "rules"
+        if llm_client.enabled:
+            llm_brief = await llm_client.structured_extract_brief(source)
+            if llm_brief:
+                if llm_brief.brief.goal:
+                    brief.goal = llm_brief.brief.goal
+                for name in llm_brief.brief.stakeholders:
+                    if name and name not in brief.stakeholders:
+                        brief.stakeholders.append(name)
+                if llm_brief.brief.meeting_date and not brief.meeting_date:
+                    brief.meeting_date = llm_brief.brief.meeting_date
+                if llm_brief.brief.context:
+                    brief.context = llm_brief.brief.context
+                used = "deepseek+rules"
 
     clarify = state.get("clarify_response")
     if clarify and not brief.goal:
@@ -162,32 +179,61 @@ async def clarify_node(state: AgentState) -> dict[str, Any]:
     }
 
 
+async def _llm_decompose(
+    chunks: list[str],
+    brief: MeetingBrief,
+    source: str,
+    base: TaskDraft | None = None,
+) -> tuple[TaskDraft, bool]:
+    """分块抽取。base 为空时不并入规则底稿。"""
+    brief_json = brief.model_dump_json()
+    limit = max(1, settings.llm_max_concurrency)
+    sem = asyncio.Semaphore(limit)
+
+    async def _one(chunk: str):
+        async with sem:
+            return await llm_client.structured_decompose(chunk, brief_json)
+
+    results = await asyncio.gather(*[_one(chunk) for chunk in chunks], return_exceptions=True)
+    llm_items = []
+    any_ok = False
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning("chunk decompose failed: %s", result)
+            continue
+        if result and result.items:
+            any_ok = True
+            llm_items.extend(result.items)
+    if not any_ok:
+        return (base if base is not None else TaskDraft()), False
+    return merge_drafts(base if base is not None else TaskDraft(), llm_items, source), True
+
+
 async def decompose_node(state: AgentState) -> dict[str, Any]:
     """规则扫全文 + LLM 分块并发抽取，再 merge。强制清空 owner_suggestions。"""
     source = state.get("source_text") or ""
     brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
     chunks = split_source(source, settings.llm_chunk_chars, settings.llm_chunk_overlap)
 
-    draft = rule_decompose(source, brief)
-    used = "rules"
-    if llm_client.enabled:
-        brief_json = brief.model_dump_json()
-        results = await asyncio.gather(
-            *[llm_client.structured_decompose(chunk, brief_json) for chunk in chunks],
-            return_exceptions=True,
-        )
-        llm_items = []
-        any_ok = False
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning("chunk decompose failed: %s", result)
-                continue
-            if result and result.items:
-                any_ok = True
-                llm_items.extend(result.items)
-        if any_ok:
-            draft = merge_drafts(draft, llm_items, source)
-            used = "deepseek+rules"
+    mode = _eval_mode(state)
+    pre_stakeholders = list(brief.stakeholders)
+    if mode == "rules":
+        draft = rule_decompose(source, brief)
+        used = "rules"
+    elif mode == "llm_only":
+        draft = TaskDraft()
+        used = "deepseek"
+        if llm_client.enabled:
+            draft, any_ok = await _llm_decompose(chunks, brief, source)
+            if not any_ok:
+                draft = TaskDraft()
+    else:
+        draft = rule_decompose(source, brief)
+        used = "rules"
+        if llm_client.enabled:
+            draft, any_ok = await _llm_decompose(chunks, brief, source, base=draft)
+            if any_ok:
+                used = "deepseek+rules"
 
     for item in draft.items:
         item.owner_suggestions = []  # 建议只允许 propose_owners 产出
@@ -200,6 +246,7 @@ async def decompose_node(state: AgentState) -> dict[str, Any]:
     return {
         "task_draft": draft.model_dump(mode="json"),
         "meeting_brief": brief.model_dump(mode="json"),
+        "eval_pre_enrich_stakeholders": pre_stakeholders,
         "pending_events": _events(
             _progress("decompose", note, "done"),
             _progress("validate_repair", "验证任务草案", "running"),
@@ -214,12 +261,14 @@ async def validate_repair_node(state: AgentState) -> dict[str, Any]:
     draft = TaskDraft.model_validate(state.get("task_draft") or {"items": []})
     events: list[dict[str, Any]] = []
 
-    if llm_client.enabled:
-        draft, validation, events = await _llm_tool_validate_repair(draft, brief, source)
-    else:
+    mode = _eval_mode(state)
+    if mode in {"rules", "llm", "llm_only"} or not llm_client.enabled:
         draft, validation, events = _rule_validate_repair(draft, brief, source)
+    else:
+        draft, validation, events = await _llm_tool_validate_repair(draft, brief, source)
 
-    go_propose = llm_client.enabled or has_owner_errors(validation)
+    use_llm = llm_client.enabled and mode != "rules"
+    go_propose = use_llm or has_owner_errors(validation)
     events.append(_progress("validate_repair", "验证完成", "done"))
     if go_propose:
         events.append(_progress("propose_owners", "生成负责人建议", "running"))
@@ -232,6 +281,7 @@ async def validate_repair_node(state: AgentState) -> dict[str, Any]:
         "task_draft": draft.model_dump(mode="json"),
         "validation": validation.model_dump(mode="json"),
         "repair_attempts": validation.repair_attempts,
+        "eval_scored_items": [item.model_dump(mode="json") for item in draft.items],
         "pending_events": events,
     }
 
@@ -518,7 +568,7 @@ async def propose_owners_node(state: AgentState) -> dict[str, Any]:
     validation = ValidationResult.model_validate(state.get("validation") or {})
 
     suggestion_count = 0
-    if llm_client.enabled and draft.items:
+    if llm_client.enabled and draft.items and _eval_mode(state) != "rules":
         pending_json = json.dumps(
             [
                 {
@@ -843,7 +893,6 @@ async def finalize_node(state: AgentState) -> dict[str, Any]:
     return {
         "markdown_output": md,
         "status": ThreadStatus.COMPLETED.value,
-        "sync_status": "not_synced",
         "review": review,
         "review_action": None,
         "pending_events": _events(

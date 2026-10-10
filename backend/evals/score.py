@@ -1,9 +1,13 @@
-"""黄金集打分：任务召回 / 主责 exact / 次责 set / HITL 触发。不代表 LLM 抽取质量。"""
+"""打分：召回 / 精确率 / 主责 / 次责 / 证据 / 负责人幻觉 / HITL。
+
+黄金集门槛只用召回、主责、次责、HITL。新指标由调用方另设下限。
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
+from app.domain.validation import quote_in_source
 from evals.runner import match_item
 
 RECALL_THRESHOLD = 0.9
@@ -12,11 +16,17 @@ SECONDARY_THRESHOLD = 0.8
 HITL_THRESHOLD = 1.0
 
 
-def score_case(case: dict[str, Any], snapshot, seen: list[str]) -> dict[str, Any]:
-    """单 case：召回看关键词配对，主责 exact，次责集合相等，HITL 类型必须对上 expect。"""
+def score_case(
+    case: dict[str, Any],
+    snapshot,
+    seen: list[str],
+    items,
+    stakeholders: list[str] | None = None,
+) -> dict[str, Any]:
+    """召回、精确率、主责、次责、证据、幻觉都打在传入的 items 上。"""
     expect = case.get("expect") or {}
     gold_items = list(expect.get("items") or [])
-    extracted = list(snapshot.task_draft.items)
+    extracted = list(items)
     used: set[str] = set()
     matched = 0
     primary_ok = 0
@@ -37,8 +47,16 @@ def score_case(case: dict[str, Any], snapshot, seen: list[str]) -> dict[str, Any
             secondary_ok += 1
 
     recall = (matched / len(gold_items)) if gold_items else 1.0
+    if not extracted:
+        precision = 1.0
+    elif not gold_items:
+        precision = 0.0
+    else:
+        precision = matched / len(extracted)
     primary_acc = (primary_ok / paired) if paired else 1.0
     secondary_acc = (secondary_ok / paired) if paired else 1.0
+    evidence_valid_rate = _evidence_valid_rate(extracted, getattr(snapshot, "source_text", "") or "")
+    owner_hallucination_rate = _owner_hallucination_rate(extracted, stakeholders or [])
 
     saw_clarify = "clarify" in seen
     saw_assign = "assign_owners" in seen
@@ -49,6 +67,9 @@ def score_case(case: dict[str, Any], snapshot, seen: list[str]) -> dict[str, Any
     return {
         "id": case.get("id"),
         "recall": recall,
+        "precision": precision,
+        "evidence_valid_rate": evidence_valid_rate,
+        "owner_hallucination_rate": owner_hallucination_rate,
         "primary_acc": primary_acc,
         "secondary_acc": secondary_acc,
         "hitl_ok": hitl_ok,
@@ -84,3 +105,26 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "rows": rows,
     }
+
+
+def _evidence_valid_rate(items: list, source: str) -> float:
+    """source 引用是原文子串的占比。没有 source 证据时记 1。"""
+    source_items = []
+    for item in items:
+        kind = getattr(item.evidence_kind, "value", item.evidence_kind)
+        if kind == "source":
+            source_items.append(item)
+    if not source_items:
+        return 1.0
+    ok = sum(1 for item in source_items if quote_in_source(item.evidence_quote or "", source))
+    return ok / len(source_items)
+
+
+def _owner_hallucination_rate(items: list, stakeholders: list[str]) -> float:
+    """主责非空且不在补名单前的干系人里。没有主责时记 0。"""
+    named = [item for item in items if (item.primary_owner or "").strip()]
+    if not named:
+        return 0.0
+    allowed = set(stakeholders)
+    bad = sum(1 for item in named if item.primary_owner.strip() not in allowed)
+    return bad / len(named)

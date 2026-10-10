@@ -28,7 +28,12 @@ function parseSSEFrame(frame: string): { event: string; data: string } | null {
   return { event, data }
 }
 
-export async function streamSSE(url: string, body: unknown, handlers: SSEHandlers): Promise<void> {
+export async function streamSSE(
+  url: string,
+  body: unknown,
+  handlers: SSEHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
   let resp: Response
   try {
     resp = await fetch(url, {
@@ -40,8 +45,10 @@ export async function streamSSE(url: string, body: unknown, handlers: SSEHandler
       },
       body: JSON.stringify(body),
       cache: 'no-store',
+      signal,
     })
   } catch (err) {
+    if (signal?.aborted) return
     const message = err instanceof Error ? err.message : '网络错误'
     handlers.onError?.({ message: `无法连接后端：${message}` })
     return
@@ -105,6 +112,7 @@ export async function streamSSE(url: string, body: unknown, handlers: SSEHandler
       }
     }
   } catch (err) {
+    if (signal?.aborted) return
     const message = err instanceof Error ? err.message : '流读取失败'
     handlers.onError?.({ message })
   }

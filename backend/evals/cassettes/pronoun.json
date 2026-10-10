@@ -1,0 +1,21 @@
+{
+  "prompt_version": "2026-10-07",
+  "entries": {
+    "fcb95df6d1d1347aa92fc5c6c5483fe7705d31079252c7b7eba0dc387e7d2ad3": {
+      "role": "assistant",
+      "content": "{\"brief\": {\"goal\": \"跟进安排\", \"stakeholders\": [\"周婷\", \"孙磊\"], \"meeting_date\": \"\", \"context\": \"跟进安排\"}}"
+    },
+    "3bf4bcc23ba6f853b202bb65eb64a41f508683351d8ddbfcaacd6e1083e60a3f": {
+      "role": "assistant",
+      "content": "{\"items\": [{\"title\": \"跟进事项\", \"description\": \"跟进事项\", \"primary_owner\": \"\", \"secondary_owners\": [], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"孙磊：这个跟进交给她负责，本周内完成。\", \"inference_reason\": \"\", \"unresolved_ref\": \"她\", \"priority\": \"medium\"}]}"
+    },
+    "7dd7260dbc1192ae3c01c65e9f99342175075bea60e0784c323aad91fb65c342": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    },
+    "95b8bc2410260d8eeb222b1fa9923f9bcbc29be38af585f1c94023ddcd15a6a1": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    }
+  }
+}

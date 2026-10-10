@@ -1,0 +1,17 @@
+{
+  "prompt_version": "2026-10-07",
+  "entries": {
+    "a43edb08e198f25a36b5f42a2df9a0284de9ccdac3052dddc93a4e974c6796b8": {
+      "role": "assistant",
+      "content": "{\"brief\": {\"goal\": \"版本检查\", \"stakeholders\": [\"周婷\"], \"meeting_date\": \"\", \"context\": \"版本检查\"}}"
+    },
+    "424cccd3a42f676e7c060cf3d3278fff07b453dc573ba679304c658bd83fe3cd": {
+      "role": "assistant",
+      "content": "{\"items\": [{\"title\": \"检查认证模块\", \"description\": \"检查认证模块\", \"primary_owner\": \"\", \"secondary_owners\": [], \"deadline\": \"\", \"acceptance_criteria\": \"交付物经干系人确认\", \"evidence_kind\": \"source\", \"evidence_quote\": \"周婷：认证模块这周也得有人看一下。\", \"inference_reason\": \"\", \"unresolved_ref\": \"\", \"priority\": \"medium\"}]}"
+    },
+    "c027d066e40698e2a2cc503186e31cadef0bf190bd0aba8d0d3a78999379449d": {
+      "role": "assistant",
+      "content": "{\"items\":[]}"
+    }
+  }
+}

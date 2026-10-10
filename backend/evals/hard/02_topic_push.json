@@ -1,0 +1,10 @@
+{
+  "id": "topic_push",
+  "source_text": "会议目标：周会\n周婷：今天推进一下整体节奏。\n孙磊：没有新的待办。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": []
+  },
+  "gold": {"clarify": "", "assignments": []}
+}

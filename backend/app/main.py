@@ -14,11 +14,13 @@ from app.api.threads import router as threads_router
 from app.config import settings
 from app.memory.checkpoint import close_checkpointer, setup_checkpointer
 from app.memory.store import memory_store
+from app.obs import configure_logging
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """先 SQLite，再绑定带 checkpointer 的图，并回写 chat/review 里的 workflow 单例。"""
+    configure_logging()
     await memory_store.init()
     checkpointer = await setup_checkpointer()
     graph = bind_compiled_graph(checkpointer)

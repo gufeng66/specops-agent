@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml ./
 COPY app ./app
-RUN pip install --no-cache-dir -e ".[agent]"
+RUN pip install --no-cache-dir -e .
 
 ENV DATABASE_PATH=/data/specops.db
 ENV CHECKPOINT_PATH=/data/specops_checkpoints.db

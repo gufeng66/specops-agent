@@ -1,0 +1,20 @@
+{
+  "llm": {
+    "compound_name": {"min_recall": 1.0, "min_precision": 0.66, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "topic_push": {"min_recall": 1.0, "min_precision": 0.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "pronoun": {"min_recall": 1.0, "min_precision": 0.5, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "weak_verb": {"min_recall": 1.0, "min_precision": 1.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "multi_task": {"min_recall": 1.0, "min_precision": 0.66, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "long_asr": {"min_recall": 1.0, "min_precision": 0.5, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "injection": {"min_recall": 1.0, "min_precision": 0.5, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0}
+  },
+  "llm_only": {
+    "compound_name": {"min_recall": 1.0, "min_precision": 1.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "topic_push": {"min_recall": 1.0, "min_precision": 1.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "pronoun": {"min_recall": 1.0, "min_precision": 1.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "weak_verb": {"min_recall": 1.0, "min_precision": 1.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "multi_task": {"min_recall": 1.0, "min_precision": 1.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "long_asr": {"min_recall": 1.0, "min_precision": 1.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0},
+    "injection": {"min_recall": 1.0, "min_precision": 1.0, "min_evidence_valid_rate": 1.0, "max_owner_hallucination_rate": 0.0}
+  }
+}
