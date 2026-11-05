@@ -6,7 +6,7 @@ import pytest
 import respx
 from httpx import Response
 
-from app.domain.models import MeetingBrief, ThreadSnapshot
+from app.domain.models import ThreadSnapshot
 from app.llm.client import LLMClient
 from app.obs import JsonFormatter, RequestContextFilter, bind_request, flush_metrics
 
@@ -54,21 +54,35 @@ def test_json_log_carries_request_id():
 async def test_decompose_limits_concurrency(monkeypatch):
     import asyncio
 
-    from app.agent.nodes import _llm_decompose
-    from app.llm.client import llm_client
+    from app.llm.runtime import http_slot, stop_llm_runtime
 
-    monkeypatch.setattr("app.agent.nodes.settings.llm_max_concurrency", 2)
+    monkeypatch.setattr("app.config.settings.llm_max_concurrency", 2)
+    await stop_llm_runtime()
     current = 0
     peak = 0
 
-    async def fake(_chunk, _brief):
+    async def worker():
         nonlocal current, peak
-        current += 1
-        peak = max(peak, current)
-        await asyncio.sleep(0.05)
-        current -= 1
-        return None
+        async with http_slot():
+            current += 1
+            peak = max(peak, current)
+            await asyncio.sleep(0.05)
+            current -= 1
 
-    monkeypatch.setattr(llm_client, "structured_decompose", fake)
-    await _llm_decompose(["a", "b", "c", "d"], MeetingBrief(goal="g"), "src")
+    await asyncio.gather(*[worker() for _ in range(4)])
     assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_call_budget_counts_retries(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr("app.llm.client.settings.llm_max_calls_per_run", 1)
+    monkeypatch.setattr("app.llm.client.settings.llm_max_retries", 1)
+    client = LLMClient()
+    with bind_request("req-budget", "run-budget"):
+        with respx.mock:
+            respx.post("https://api.deepseek.com/chat/completions").mock(
+                return_value=Response(500, text="no")
+            )
+            with pytest.raises(Exception, match="budget|HTTP 500"):
+                await client.post_completions({"messages": []}, "intake")

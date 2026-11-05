@@ -10,7 +10,10 @@
           "部署"
         ],
         "primary_owner": "王强",
-        "secondary_owners": []
+        "secondary_owners": [],
+        "evidence_spans": [
+          "王强安排预发环境部署测试，确认本月底上线。"
+        ]
       }
     ]
   },

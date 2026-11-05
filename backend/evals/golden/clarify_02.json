@@ -10,7 +10,10 @@
           "监控"
         ],
         "primary_owner": "李娜",
-        "secondary_owners": []
+        "secondary_owners": [],
+        "evidence_spans": [
+          "李娜跟进监控看板修复，本周完成。"
+        ]
       }
     ]
   },

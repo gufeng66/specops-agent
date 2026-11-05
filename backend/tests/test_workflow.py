@@ -81,6 +81,17 @@ def test_rule_extract_brief_speakers():
     assert "李娜" in brief.stakeholders
 
 
+def test_discussion_clause_keeps_later_commitment():
+    brief = rule_extract_brief("会议目标：上线\n参会人：张三")
+    kept = rule_decompose("张三先讨论方案，然后负责完成部署。", brief)
+    assert len(kept.items) == 1
+    assert kept.items[0].primary_owner == "张三"
+    assert "部署" in kept.items[0].description
+    assert "先讨论" not in kept.items[0].description
+    skipped = rule_decompose("暂不推进支付改造，先讨论可行性。", brief)
+    assert skipped.items == []
+
+
 def test_rule_extract_brief_topic_header():
     from pathlib import Path
 
@@ -240,10 +251,16 @@ def test_patch_target_item_preserves_ids():
         ActionItem(id="a2", title="任务2", acceptance_criteria="完成2", evidence_quote="y"),
     ]
     draft = TaskDraft(items=items)
-    patched = patch_target_item(draft, "a1", "请补充细节")
+    patched, changed = patch_target_item(draft, "a1", {"deadline": "下周五"})
+    assert changed
     assert patched.items[0].id == "a1"
     assert patched.items[1].id == "a2"
-    assert "修订反馈" in patched.items[0].description
+    assert patched.items[0].deadline == "下周五"
+    assert patched.items[1].deadline == ""
+    same, unchanged = patch_target_item(patched, "a1", {"deadline": "下周五"})
+    assert not unchanged
+    missing, _ = patch_target_item(patched, "missing", {"title": "x"})
+    assert missing is patched
 
 
 @pytest.mark.asyncio
@@ -455,29 +472,48 @@ async def test_item_revise_and_approve(tmp_path):
 
 @pytest.mark.asyncio
 async def test_idempotency(tmp_path):
+    from app.memory.store import ClaimOutcome
+
     store = MemoryStore(str(tmp_path / "idem.db"))
     await store.init()
-    snap = await store.ensure_thread("t-idem")
-    snap.run_id = "run-1"
-    await store.complete_request("req-idem", "t-idem", "run-1", snap)
+    await store.ensure_thread("t-idem")
+    payload = {"source_text": "会议目标：幂等"}
+    first = await store.claim_operation(
+        request_id="req-idem", op="start", thread_id="t-idem", payload=payload, source_text=payload["source_text"]
+    )
+    assert first.outcome == ClaimOutcome.CLAIMED
+    assert first.snapshot is not None
+    saved = first.snapshot.model_copy(deep=True)
+    saved.status = ThreadStatus.AWAITING_REVIEW
+    assert await store.finish_request("req-idem", saved, request_status="succeeded")
 
-    claimed, existing = await store.claim_request("req-idem", "t-idem")
-    assert claimed is False
-    assert existing is not None
+    again = await store.claim_operation(
+        request_id="req-idem", op="start", thread_id="t-idem", payload=payload, source_text=payload["source_text"]
+    )
+    assert again.outcome == ClaimOutcome.REPLAY
+    assert again.snapshot is not None
+    assert again.snapshot.status == ThreadStatus.AWAITING_REVIEW
 
 
 @pytest.mark.asyncio
 async def test_thread_busy(tmp_path):
-    from app.errors import ThreadBusyError
-
     store = MemoryStore(str(tmp_path / "busy.db"))
     await store.init()
     snap = await store.ensure_thread("t-busy")
+    from app.memory.store import ClaimOutcome
+
     snap.status = ThreadStatus.PLANNING
     await store.save_thread(snap)
 
-    with pytest.raises(ThreadBusyError):
-        await store.claim_request("new-req", "t-busy")
+    result = await store.claim_operation(
+        request_id="new-req",
+        op="start",
+        thread_id="t-busy",
+        payload={"source_text": "x"},
+        source_text="x",
+    )
+    assert result.outcome == ClaimOutcome.REJECTED
+    assert result.code == "THREAD_BUSY"
 
 
 @pytest.mark.asyncio
@@ -1431,11 +1467,30 @@ async def test_review_drop_idempotent_replay(tmp_path):
         pass
     after = await store.get_thread("t-drop-idem")
     count = len(after.task_draft.items)
-    claimed, existing = await store.claim_request("req-drop-idem-2")
-    assert claimed is False
-    assert existing is not None
-    assert len(existing.task_draft.items) == count
-    assert drop_id not in [i.id for i in existing.task_draft.items]
+    from app.memory.store import ClaimOutcome
+
+    again = await store.claim_operation(
+        request_id="req-drop-idem-2",
+        op="resume",
+        thread_id=after.thread_id,
+        payload={
+            "revision_scope": "drop",
+            "target_item_id": None,
+            "feedback": "",
+            "approve": False,
+            "assignments": [],
+            "drop_item_ids": [drop_id],
+            "interrupt_id": snap.interrupt_id,
+            "interrupt_type": str((snap.interrupt_payload or {}).get("type") or ""),
+            "item_patch": None,
+        },
+        interrupt_id=snap.interrupt_id,
+        interrupt_type=str((snap.interrupt_payload or {}).get("type") or ""),
+    )
+    assert again.outcome == ClaimOutcome.REPLAY
+    assert again.snapshot is not None
+    assert len(again.snapshot.task_draft.items) == count
+    assert drop_id not in [i.id for i in again.snapshot.task_draft.items]
 
 
 @pytest.mark.asyncio

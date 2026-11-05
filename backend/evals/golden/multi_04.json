@@ -12,6 +12,9 @@
         "primary_owner": "孙磊",
         "secondary_owners": [
           "马超"
+        ],
+        "evidence_spans": [
+          "灰度白名单配置由孙磊负责完成，马超配合提供名单。"
         ]
       }
     ]

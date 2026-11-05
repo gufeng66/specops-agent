@@ -21,6 +21,14 @@ class ThreadBusyError(SpecOpsError):
         self.thread_id = thread_id
 
 
+def conflict_http(code: str, message: str, **extra: object) -> HTTPException:
+    """409。认领冲突、执行中、中断不匹配都走这里。"""
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"code": code, "message": message, **extra},
+    )
+
+
 def thread_busy_http(thread_id: str) -> HTTPException:
     """409 + THREAD_BUSY。前端 sse.ts 用 detail.message 展示中文。"""
     return HTTPException(

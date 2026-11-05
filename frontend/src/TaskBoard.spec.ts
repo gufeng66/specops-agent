@@ -26,6 +26,7 @@ describe('TaskBoard', () => {
     const text = wrapper.text()
     expect(text).toContain('张伟')
     expect(text).toContain('李娜')
+    expect(wrapper.find('.task-card').element.tagName).toBe('BUTTON')
     expect(wrapper.findAll('.role-primary').length).toBe(1)
     expect(wrapper.findAll('.role-secondary').length).toBe(1)
     expect(text.match(/完成代码评审/g)?.length).toBe(2)

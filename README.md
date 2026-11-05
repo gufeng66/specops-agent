@@ -109,10 +109,13 @@ intake (DeepSeek | rules)
 
 ```powershell
 cd backend
+$env:UV_INDEX_URL = 'https://mirrors.aliyun.com/pypi/simple'
 uv sync --extra dev
 copy .env.example .env
 uv run uvicorn app.main:app --reload --port 8001
 ```
+
+清华 PyPI 镜像下载 wheel 时会返回 403，所以上面先把 `UV_INDEX_URL` 指到阿里云源。这个变量只在当前终端生效。
 
 前端（新终端）：
 
@@ -229,9 +232,11 @@ npm test
 npm run build
 ```
 
-本地端到端（不进 CI）：`npm run test:e2e`。它会拉起无 Key 的后端和 Vite，走示例3 的分析、分配、审核和导出。首次需要 `npx playwright install chromium`。
+本地端到端：`npm run test:e2e`。它会拉起无 Key 的后端和 Vite，走示例3，并在审核中刷新后改字段、批准、导出。CI 的 `e2e` 作业跑同一组用例。首次需要 `npx playwright install chromium`。
 
 GitHub Actions 使用 Python 3.12、uv、Node.js 22 和 `LLM_PROVIDER=none`。
+
+最近一次本地实跑结果见 [`docs/测试报告.md`](docs/测试报告.md)。
 
 ## 项目结构
 

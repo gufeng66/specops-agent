@@ -12,6 +12,9 @@
         "primary_owner": "孙磊",
         "secondary_owners": [
           "邓凯"
+        ],
+        "evidence_spans": [
+          "支付修复由孙磊负责开发，邓凯配合回归测试，本周完成。"
         ]
       }
     ]

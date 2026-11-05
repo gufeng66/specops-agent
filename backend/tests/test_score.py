@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from app.domain.models import ActionItem
+from app.domain.models import ActionItem, EvidenceKind
 from evals.score import score_case
 
 
@@ -26,6 +26,37 @@ def test_precision_two_of_three():
         {"title_keywords": ["发布"], "primary_owner": "", "secondary_owners": []},
     ]
     assert _row(items, gold)["precision"] == 2 / 3
+
+
+def test_short_quote_does_not_cover_annotated_span():
+    gold = [
+        {
+            "title_keywords": ["支付"],
+            "primary_owner": "",
+            "secondary_owners": [],
+            "evidence_spans": ["Alice will fix payment"],
+        }
+    ]
+    short = [
+        ActionItem(
+            title="支付",
+            description="支付",
+            evidence_kind=EvidenceKind.SOURCE,
+            evidence_quote="Alice",
+        )
+    ]
+    covered = [
+        ActionItem(
+            title="支付",
+            description="支付",
+            evidence_kind=EvidenceKind.SOURCE,
+            evidence_quote="Alice will fix payment tomorrow",
+        )
+    ]
+    assert _row(short, gold)["annotated_match_rate"] == 0
+    assert _row(covered, gold)["annotated_match_rate"] == 1
+    allowed = [{**gold[0], "acceptable_quotes": ["Alice"]}]
+    assert _row(short, allowed)["annotated_match_rate"] == 1
 
 
 def test_precision_counts_unmatched_item():

@@ -301,7 +301,63 @@ CASES: list[dict] = [
         },
         "gold": {"clarify": "", "assignments": []},
     },
+    {
+        "id": "neg_hold",
+        "source_text": "会议目标：支付讨论\n参会人：张伟\n暂不推进支付改造，先讨论可行性。",
+        "expect": {"needs_clarify": False, "needs_assignment": False, "items": []},
+        "gold": {"clarify": "", "assignments": []},
+    },
+    {
+        "id": "neg_cancel",
+        "source_text": "会议目标：发布取舍\n参会人：张伟\n部署任务取消，不再执行。",
+        "expect": {"needs_clarify": False, "needs_assignment": False, "items": []},
+        "gold": {"clarify": "", "assignments": []},
+    },
+    {
+        "id": "neg_undecided",
+        "source_text": "会议目标：方案会\n参会人：李娜\n支付改造只讨论，今天不形成任务。",
+        "expect": {"needs_clarify": False, "needs_assignment": False, "items": []},
+        "gold": {"clarify": "", "assignments": []},
+    },
+    {
+        "id": "cross_chunk",
+        "source_text": (
+            "会议目标：长会纪要\n参会人：张伟\n"
+            + ("背景同步，没有新的行动。\n" * 40)
+            + "张伟负责完成跨段验收，下周五前提交。"
+        ),
+        "expect": {
+            "needs_clarify": False,
+            "needs_assignment": False,
+            "items": [
+                {
+                    "title_keywords": ["跨段"],
+                    "primary_owner": "张伟",
+                    "secondary_owners": [],
+                    "evidence_spans": ["张伟负责完成跨段验收，下周五前提交。"],
+                }
+            ],
+        },
+        "gold": {"clarify": "", "assignments": []},
+    },
 ]
+
+_SPANS = {
+    "single_01": ["张伟负责完成用户认证模块重构，下周五前提交代码评审。"],
+    "single_02": ["李娜跟进 API 文档更新，本周内完成并发布。"],
+    "single_03": ["王强安排预发环境部署测试，确认本月底上线。"],
+    "single_04": ["邓凯负责完成告警规则修复，本周五前提交。"],
+    "multi_01": ["新产品上线工作由周婷统筹，孙磊、邓凯和马超配合，截止时间为2026年8月31日。"],
+    "multi_02": ["根因报告由张伟牵头，李娜协助整理时间线并跟进通报。"],
+    "multi_03": ["支付修复由孙磊负责开发，邓凯配合回归测试，本周完成。"],
+    "assign_01": ["认证模块这周要完成代码评审并提交。"],
+    "assign_02": ["接口说明本周内需要完成更新并发布到内部 Wiki。"],
+    "assign_03": ["预发环境部署测试这周要安排上线确认。"],
+    "clarify_01": ["张三负责完成部署测试。"],
+    "clarify_02": ["李娜跟进监控看板修复，本周完成。"],
+    "clarify_assign_01": ["认证模块这周要完成代码评审。"],
+    "multi_04": ["灰度白名单配置由孙磊负责完成，马超配合提供名单。"],
+}
 
 
 def write_golden() -> list[Path]:
@@ -309,6 +365,9 @@ def write_golden() -> list[Path]:
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for case in CASES:
+        spans = _SPANS.get(case["id"]) or []
+        for item, span in zip(case["expect"]["items"], spans):
+            item["evidence_spans"] = [span]
         path = GOLDEN_DIR / f"{case['id']}.json"
         path.write_text(json.dumps(case, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         written.append(path)

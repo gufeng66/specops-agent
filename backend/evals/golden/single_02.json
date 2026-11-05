@@ -10,7 +10,10 @@
           "文档"
         ],
         "primary_owner": "李娜",
-        "secondary_owners": []
+        "secondary_owners": [],
+        "evidence_spans": [
+          "李娜跟进 API 文档更新，本周内完成并发布。"
+        ]
       }
     ]
   },

@@ -10,7 +10,10 @@
           "认证"
         ],
         "primary_owner": "张伟",
-        "secondary_owners": []
+        "secondary_owners": [],
+        "evidence_spans": [
+          "张伟负责完成用户认证模块重构，下周五前提交代码评审。"
+        ]
       }
     ]
   },

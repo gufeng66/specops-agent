@@ -1,0 +1,13 @@
+{
+  "id": "neg_cancel",
+  "source_text": "会议目标：发布取舍\n参会人：张伟\n部署任务取消，不再执行。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": []
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

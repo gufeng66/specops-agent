@@ -123,9 +123,9 @@ def merge_drafts(rule_draft: TaskDraft, llm_items: Sequence[ActionItem], source:
 
 
 def enrich_brief_from_items(brief: MeetingBrief, items: Sequence[ActionItem]) -> MeetingBrief:
-    """用已抽出的主/次责补干系人，避免后续 INVALID_PRIMARY。不把建议名写进名单。"""
-    names = [n for n in brief.stakeholders if n]
-    seen = set(names)
+    """模型或规则抽出的姓名只记入 discovered_names，不因此变成可信名单。"""
+    names = [n for n in brief.discovered_names if n]
+    seen = set(brief.stakeholders) | set(names)
     for item in items:
         for raw in [item.primary_owner, *item.secondary_owners]:
             name = (raw or "").strip()
@@ -133,7 +133,7 @@ def enrich_brief_from_items(brief: MeetingBrief, items: Sequence[ActionItem]) ->
                 seen.add(name)
                 names.append(name)
     out = brief.model_copy()
-    out.stakeholders = names
+    out.discovered_names = names
     return out
 
 

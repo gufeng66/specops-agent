@@ -12,6 +12,9 @@
         "primary_owner": "张伟",
         "secondary_owners": [
           "李娜"
+        ],
+        "evidence_spans": [
+          "根因报告由张伟牵头，李娜协助整理时间线并跟进通报。"
         ]
       }
     ]

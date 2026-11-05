@@ -34,14 +34,21 @@ from app.domain.chunking import (
 )
 from app.domain.extractors import (
     apply_owner_assignments,
+    apply_revision_deletions,
     needs_clarification,
     patch_target_item,
     rule_decompose,
     rule_extract_brief,
+    trust_edited_names,
 )
 from app.domain.models import MeetingBrief, TaskDraft, ThreadStatus, ValidationResult
 from app.domain.review_intent import parse_drop_intent
-from app.domain.validation import OWNER_ERROR_CODES, has_owner_errors, sanitize_owner_candidates
+from app.domain.validation import (
+    OWNER_ERROR_CODES,
+    UNREPAIRABLE_CODES,
+    has_owner_errors,
+    sanitize_owner_candidates,
+)
 from app.llm.client import llm_client
 from app.llm.errors import LLMError
 
@@ -93,7 +100,9 @@ async def intake_node(state: AgentState) -> dict[str, Any]:
         brief = MeetingBrief()
         used = "deepseek"
         if llm_client.enabled:
-            llm_brief = await llm_client.structured_extract_brief(source)
+            llm_brief = await llm_client.structured_extract_brief(
+                source, revision_notes=list(state.get("revision_notes") or [])
+            )
             if llm_brief is not None:
                 brief = llm_brief.brief
     elif mode == "rules":
@@ -103,13 +112,15 @@ async def intake_node(state: AgentState) -> dict[str, Any]:
         brief = rule_extract_brief(source)
         used = "rules"
         if llm_client.enabled:
-            llm_brief = await llm_client.structured_extract_brief(source)
+            llm_brief = await llm_client.structured_extract_brief(
+                source, revision_notes=list(state.get("revision_notes") or [])
+            )
             if llm_brief:
                 if llm_brief.brief.goal:
                     brief.goal = llm_brief.brief.goal
                 for name in llm_brief.brief.stakeholders:
-                    if name and name not in brief.stakeholders:
-                        brief.stakeholders.append(name)
+                    if name and name not in brief.stakeholders and name not in brief.discovered_names:
+                        brief.discovered_names.append(name)
                 if llm_brief.brief.meeting_date and not brief.meeting_date:
                     brief.meeting_date = llm_brief.brief.meeting_date
                 if llm_brief.brief.context:
@@ -184,29 +195,32 @@ async def _llm_decompose(
     brief: MeetingBrief,
     source: str,
     base: TaskDraft | None = None,
-) -> tuple[TaskDraft, bool]:
-    """分块抽取。base 为空时不并入规则底稿。"""
-    brief_json = brief.model_dump_json()
-    limit = max(1, settings.llm_max_concurrency)
-    sem = asyncio.Semaphore(limit)
+    revision_notes: list[str] | None = None,
+) -> tuple[TaskDraft, bool, dict[str, int]]:
+    """分块抽取。空任务是成功；调用失败才计入 failed。"""
+    brief_json = brief.model_dump_json(exclude={"discovered_names"})
 
     async def _one(chunk: str):
-        async with sem:
-            return await llm_client.structured_decompose(chunk, brief_json)
+        return await llm_client.structured_decompose(chunk, brief_json, revision_notes=revision_notes)
 
     results = await asyncio.gather(*[_one(chunk) for chunk in chunks], return_exceptions=True)
     llm_items = []
-    any_ok = False
+    ok = empty = failed = 0
     for result in results:
-        if isinstance(result, Exception):
-            logger.warning("chunk decompose failed: %s", result)
+        if isinstance(result, Exception) or result is None:
+            if isinstance(result, Exception):
+                logger.warning("chunk decompose failed: %s", result)
+            failed += 1
             continue
-        if result and result.items:
-            any_ok = True
+        ok += 1
+        if result.items:
             llm_items.extend(result.items)
-    if not any_ok:
-        return (base if base is not None else TaskDraft()), False
-    return merge_drafts(base if base is not None else TaskDraft(), llm_items, source), True
+        else:
+            empty += 1
+    stats = {"ok": ok, "empty": empty, "failed": failed}
+    if ok == 0:
+        return (base if base is not None else TaskDraft()), False, stats
+    return merge_drafts(base if base is not None else TaskDraft(), llm_items, source), True, stats
 
 
 async def decompose_node(state: AgentState) -> dict[str, Any]:
@@ -216,7 +230,9 @@ async def decompose_node(state: AgentState) -> dict[str, Any]:
     chunks = split_source(source, settings.llm_chunk_chars, settings.llm_chunk_overlap)
 
     mode = _eval_mode(state)
+    notes = list(state.get("revision_notes") or [])
     pre_stakeholders = list(brief.stakeholders)
+    stats = {"ok": 0, "empty": 0, "failed": 0}
     if mode == "rules":
         draft = rule_decompose(source, brief)
         used = "rules"
@@ -224,24 +240,27 @@ async def decompose_node(state: AgentState) -> dict[str, Any]:
         draft = TaskDraft()
         used = "deepseek"
         if llm_client.enabled:
-            draft, any_ok = await _llm_decompose(chunks, brief, source)
+            draft, any_ok, stats = await _llm_decompose(chunks, brief, source, revision_notes=notes)
             if not any_ok:
                 draft = TaskDraft()
     else:
         draft = rule_decompose(source, brief)
         used = "rules"
         if llm_client.enabled:
-            draft, any_ok = await _llm_decompose(chunks, brief, source, base=draft)
+            draft, any_ok, stats = await _llm_decompose(
+                chunks, brief, source, base=draft, revision_notes=notes
+            )
             if any_ok:
                 used = "deepseek+rules"
 
+    draft = apply_revision_deletions(draft, notes)
     for item in draft.items:
         item.owner_suggestions = []  # 建议只允许 propose_owners 产出
 
     brief = enrich_brief_from_items(brief, draft.items)
     note = f"得到 {len(draft.items)} 项 · {_route_label(used)}"
-    if len(chunks) > 1:
-        note += f" · 已处理 {len(chunks)} 块"
+    if stats["ok"] or stats["empty"] or stats["failed"]:
+        note += f" · 成功 {stats['ok']} 块，零任务 {stats['empty']} 块，失败 {stats['failed']} 块"
 
     return {
         "task_draft": draft.model_dump(mode="json"),
@@ -308,7 +327,7 @@ def _rule_validate_repair(
                 }
             )
         )
-        repairable = [i for i in validation.error_issues if i.code not in OWNER_ERROR_CODES]
+        repairable = [i for i in validation.error_issues if i.code not in UNREPAIRABLE_CODES]
         if not repairable:
             break
         if attempt >= MAX_REPAIR:
@@ -373,6 +392,9 @@ def _execute_loop_tool(
         return draft, payload
     if name == "repair_task_draft":
         validation = validate_task_draft_tool(draft, brief, source)
+        repairable = [i for i in validation.error_issues if i.code not in UNREPAIRABLE_CODES]
+        if not repairable:
+            return draft, {"tool": name, "item_count": len(draft.items), "skipped": True}
         draft = repair_task_draft_tool(draft, validation, source, brief)
         payload = {"tool": name, "item_count": len(draft.items)}
         return draft, payload
@@ -586,7 +608,7 @@ async def propose_owners_node(state: AgentState) -> dict[str, Any]:
         )
         try:
             batch = await llm_client.structured_propose_owners(
-                brief_json=brief.model_dump_json(),
+                brief_json=brief.model_dump_json(exclude={"discovered_names"}),
                 pending_json=pending_json,
                 windows=evidence_windows(source, draft),
             )
@@ -658,7 +680,8 @@ async def assign_owners_node(state: AgentState) -> dict[str, Any]:
     assignments: list[dict[str, Any]] = []
     if isinstance(raw, dict):
         assignments = list(raw.get("assignments") or [])
-    draft = apply_owner_assignments(draft, assignments)
+    review = dict(state.get("review") or {})
+    draft, brief, review = _apply_confirmed_owners(draft, brief, assignments, review)
     validation = validate_task_draft_tool(draft, brief, source)
     attempts += 1
 
@@ -666,6 +689,8 @@ async def assign_owners_node(state: AgentState) -> dict[str, Any]:
     if still_bad and attempts < MAX_ASSIGN:
         return {
             "task_draft": draft.model_dump(mode="json"),
+            "meeting_brief": brief.model_dump(mode="json"),
+            "review": review,
             "validation": validation.model_dump(mode="json"),
             "assign_attempts": attempts,
             "assign_action": {"route": "assign_owners"},
@@ -680,6 +705,8 @@ async def assign_owners_node(state: AgentState) -> dict[str, Any]:
     note = "负责人已确认" if not still_bad else f"已达 {MAX_ASSIGN} 次，携带未解决问题进入审核"
     return {
         "task_draft": draft.model_dump(mode="json"),
+        "meeting_brief": brief.model_dump(mode="json"),
+        "review": review,
         "validation": validation.model_dump(mode="json"),
         "assign_attempts": attempts,
         "assign_action": {"route": "review"},
@@ -751,25 +778,82 @@ async def review_node(state: AgentState) -> dict[str, Any]:
         raw_drop_ids = [raw_drop_ids]
     drop_item_ids = [str(i) for i in raw_drop_ids if str(i).strip()]
 
+    prev = dict(state.get("review") or {})
     review = {
         "feedback": feedback,
         "revision_scope": revision_scope,
         "target_item_id": target_item_id,
         "approved": approve,
         "dropped_item_ids": [],
+        "reviewed_task_count": int(prev.get("reviewed_task_count") or 0) or len(draft.items),
+        "edited_item_ids": list(prev.get("edited_item_ids") or []),
+        "dropped_task_count": int(prev.get("dropped_task_count") or 0),
     }
+    cleared = {"markdown_output": ""}
+
+    item_patch = action.get("item_patch") if isinstance(action, dict) else None
+    if isinstance(item_patch, dict) and item_patch:
+        if not target_item_id or all(item.id != str(target_item_id) for item in draft.items):
+            return {
+                "interrupt_id": interrupt_id,
+                "interrupt_payload": None,
+                "review_action": {"route": "review"},
+                "review": review,
+                "status": ThreadStatus.PLANNING.value,
+                **cleared,
+                "pending_events": _events(_progress("review", "目标任务不存在")),
+            }
+        before = next(item for item in draft.items if item.id == str(target_item_id))
+        patched, changed = patch_target_item(draft, str(target_item_id), item_patch)
+        if not changed:
+            return {
+                "interrupt_id": interrupt_id,
+                "interrupt_payload": None,
+                "review_action": {"route": "review"},
+                "review": review,
+                "status": ThreadStatus.PLANNING.value,
+                "pending_events": _events(_progress("review", "未修改字段")),
+            }
+        after = next(item for item in patched.items if item.id == str(target_item_id))
+        brief = trust_edited_names(
+            MeetingBrief.model_validate(state.get("meeting_brief") or {}),
+            before,
+            after,
+            confirm=False,
+        )
+        if str(target_item_id) not in review["edited_item_ids"]:
+            review["edited_item_ids"].append(str(target_item_id))
+        source = state.get("source_text") or ""
+        validation = validate_task_draft_tool(patched, brief, source)
+        return {
+            "task_draft": patched.model_dump(mode="json"),
+            "meeting_brief": brief.model_dump(mode="json"),
+            "validation": validation.model_dump(mode="json"),
+            "interrupt_id": interrupt_id,
+            "interrupt_payload": None,
+            "review_action": {"route": "validate_repair"},
+            "review": review,
+            "status": ThreadStatus.PLANNING.value,
+            "assign_attempts": 0,
+            **cleared,
+            "pending_events": _events(
+                _progress("review", "已保存字段修改，重新验证", "done"),
+                _progress("validate_repair", "验证任务草案", "running"),
+            ),
+        }
 
     if approve:
         assignments: list[dict[str, Any]] = []
         if isinstance(action, dict):
             assignments = list(action.get("assignments") or [])
+        brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
         if assignments:
-            draft = apply_owner_assignments(draft, assignments)
-            brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
+            draft, brief, review = _apply_confirmed_owners(draft, brief, assignments, review)
             source = state.get("source_text") or ""
             validation = validate_task_draft_tool(draft, brief, source)
         return {
             "task_draft": draft.model_dump(mode="json"),
+            "meeting_brief": brief.model_dump(mode="json"),
             "validation": validation.model_dump(mode="json"),
             "interrupt_id": interrupt_id,
             "interrupt_payload": None,
@@ -779,6 +863,25 @@ async def review_node(state: AgentState) -> dict[str, Any]:
             "pending_events": _events(
                 _progress("review", "已批准", "done"),
                 _progress("finalize", "生成导出", "running"),
+            ),
+        }
+
+    if revision_scope == "document":
+        notes = list(state.get("revision_notes") or [])
+        if feedback.strip():
+            notes.append(feedback.strip())
+        return {
+            "revision_notes": notes,
+            "markdown_output": "",
+            "interrupt_id": interrupt_id,
+            "interrupt_payload": None,
+            "review_action": {"route": "intake"},
+            "review": review,
+            "status": ThreadStatus.PLANNING.value,
+            "assign_attempts": 0,
+            "pending_events": _events(
+                _progress("review", "文档修订，重跑 intake", "done"),
+                _progress("intake", "重新解析会议输入", "running"),
             ),
         }
 
@@ -808,9 +911,11 @@ async def review_node(state: AgentState) -> dict[str, Any]:
         validation = validate_task_draft_tool(dropped, brief, source)
         review["revision_scope"] = "drop"
         review["dropped_item_ids"] = parsed.item_ids
+        review["dropped_task_count"] = int(review["dropped_task_count"]) + len(parsed.item_ids)
         return {
             "task_draft": dropped.model_dump(mode="json"),
             "validation": validation.model_dump(mode="json"),
+            "markdown_output": "",
             "interrupt_id": interrupt_id,
             "interrupt_payload": None,
             "review_action": {
@@ -825,47 +930,36 @@ async def review_node(state: AgentState) -> dict[str, Any]:
             ),
         }
 
-    if revision_scope == "document":
-        source = (state.get("source_text") or "").rstrip()
-        source = f"{source}\n\n[文档修订] {feedback}".strip()
-        return {
-            "source_text": source,
-            "interrupt_id": interrupt_id,
-            "interrupt_payload": None,
-            "review_action": {"route": "intake"},
-            "review": review,
-            "status": ThreadStatus.PLANNING.value,
-            "assign_attempts": 0,
-            "pending_events": _events(
-                _progress("review", "文档修订，重跑 intake", "done"),
-                _progress("intake", "重新解析会议输入", "running"),
-            ),
-        }
-
-    if not target_item_id:
-        return {
-            "interrupt_id": interrupt_id,
-            "interrupt_payload": None,
-            "review_action": {"route": "review"},
-            "review": review,
-            "status": ThreadStatus.PLANNING.value,
-            "pending_events": _events(_progress("review", "缺少 target_item_id，重新进入审核")),
-        }
-
-    patched = patch_target_item(draft, str(target_item_id), feedback)
     return {
-        "task_draft": patched.model_dump(mode="json"),
         "interrupt_id": interrupt_id,
         "interrupt_payload": None,
-        "review_action": {"route": "validate_repair"},
+        "review_action": {"route": "review"},
         "review": review,
         "status": ThreadStatus.PLANNING.value,
-        "assign_attempts": 0,
-        "pending_events": _events(
-            _progress("review", "已应用单项修订，重新验证", "done"),
-            _progress("validate_repair", "验证任务草案", "running"),
-        ),
+        "pending_events": _events(_progress("review", "未修改字段")),
     }
+
+
+def _apply_confirmed_owners(draft, brief, assignments, review):
+    """改过或勾选确认的姓名才进入可信名单。值没变不计人工修改。"""
+    before = {item.id: item.model_copy(deep=True) for item in draft.items}
+    updated = apply_owner_assignments(draft, assignments)
+    edited = list(review.get("edited_item_ids") or [])
+    after = {item.id: item for item in updated.items}
+    for raw in assignments:
+        item_id = str(raw.get("item_id") or "")
+        if item_id not in before or item_id not in after:
+            continue
+        if before[item_id].model_dump() != after[item_id].model_dump() and item_id not in edited:
+            edited.append(item_id)
+        brief = trust_edited_names(
+            brief,
+            before[item_id],
+            after[item_id],
+            confirm=bool(raw.get("confirm_owner")),
+        )
+    review["edited_item_ids"] = edited
+    return updated, brief, review
 
 
 def route_after_review(
@@ -873,10 +967,10 @@ def route_after_review(
 ) -> Literal["finalize", "intake", "validate_repair", "review"]:
     """批准→finalize；全文重跑→intake；单项修订→validate_repair；删除后再审→review。"""
     action = state.get("review_action") or {}
-    route = action.get("route") or "finalize"
+    route = action.get("route") or "review"
     if route in ("finalize", "intake", "validate_repair", "review"):
         return route  # type: ignore[return-value]
-    return "finalize"
+    return "review"
 
 
 async def finalize_node(state: AgentState) -> dict[str, Any]:

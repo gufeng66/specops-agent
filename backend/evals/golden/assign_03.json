@@ -12,6 +12,9 @@
         "primary_owner": "王强",
         "secondary_owners": [
           "张伟"
+        ],
+        "evidence_spans": [
+          "预发环境部署测试这周要安排上线确认。"
         ]
       }
     ]

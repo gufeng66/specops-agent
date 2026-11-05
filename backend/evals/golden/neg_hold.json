@@ -1,0 +1,13 @@
+{
+  "id": "neg_hold",
+  "source_text": "会议目标：支付讨论\n参会人：张伟\n暂不推进支付改造，先讨论可行性。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": []
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}

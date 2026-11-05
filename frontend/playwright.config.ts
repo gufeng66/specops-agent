@@ -3,7 +3,12 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig } from '@playwright/test'
 
 const backend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../backend')
-const python = path.join(backend, '.venv', 'Scripts', 'python.exe')
+const python = path.join(
+  backend,
+  '.venv',
+  process.platform === 'win32' ? 'Scripts' : 'bin',
+  process.platform === 'win32' ? 'python.exe' : 'python',
+)
 
 export default defineConfig({
   testDir: './e2e',

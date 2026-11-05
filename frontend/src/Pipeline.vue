@@ -19,6 +19,18 @@ export type NodeStatus = 'pending' | 'running' | 'done' | 'skipped' | 'waiting'
 defineProps<{
   statuses: Record<string, NodeStatus>
 }>()
+
+const HINT: Record<string, string> = {
+  pending: '未开始',
+  running: '进行中',
+  done: '已完成',
+  skipped: '已跳过',
+  waiting: '待你操作',
+}
+
+function hint(status?: string) {
+  return HINT[status || 'pending'] || status || '未开始'
+}
 </script>
 
 <template>
@@ -31,7 +43,7 @@ defineProps<{
     >
       <span class="dot" />
       <span class="label">{{ node.label }}</span>
-      <span class="hint">{{ statuses[node.id] === 'waiting' ? '待你操作' : (statuses[node.id] || 'pending') }}</span>
+      <span class="hint">{{ hint(statuses[node.id]) }}</span>
       <span v-if="idx < NODES.length - 1" class="connector" />
     </li>
   </ol>
@@ -41,7 +53,7 @@ defineProps<{
 .pipeline {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.15rem 0;
+  gap: 0.35rem 0.75rem;
   list-style: none;
   padding: 0.25rem 0 0;
 }
@@ -49,41 +61,31 @@ defineProps<{
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  font-size: 0.875rem;
+  color: var(--muted);
   position: relative;
 }
 .dot {
   width: 0.55rem;
   height: 0.55rem;
   border-radius: 50%;
-  background: #3a4654;
+  background: var(--line);
   flex-shrink: 0;
 }
-.label { font-weight: 600; }
-.hint {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.75rem;
-}
+.label { font-weight: 650; color: var(--ink); }
+.hint { font-size: 0.875rem; }
 .connector {
-  width: 1.1rem;
+  width: 1rem;
   height: 1px;
-  background: var(--border);
-  margin: 0 0.35rem;
+  background: var(--line);
+  margin-left: 0.15rem;
 }
-.st-running { color: var(--accent); }
-.st-running .dot {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(61, 139, 253, 0.25);
-}
-.st-done { color: var(--success); }
-.st-done .dot { background: var(--success); }
-.st-skipped { color: var(--text-muted); opacity: 0.55; }
-.st-skipped .dot { background: #4a5563; }
-.st-waiting { color: var(--warn); }
-.st-waiting .dot {
-  background: var(--warn);
-  box-shadow: 0 0 0 3px rgba(255, 176, 32, 0.25);
-}
+.st-running { color: var(--primary); }
+.st-running .dot { background: var(--primary); }
+.st-running .label { color: var(--primary); }
+.st-done .dot { background: var(--ok); }
+.st-skipped { opacity: 0.7; }
+.st-waiting { color: var(--amber); }
+.st-waiting .dot { background: var(--amber); }
+.st-waiting .label { color: var(--amber); }
 </style>

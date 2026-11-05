@@ -10,7 +10,10 @@
           "告警"
         ],
         "primary_owner": "邓凯",
-        "secondary_owners": []
+        "secondary_owners": [],
+        "evidence_spans": [
+          "邓凯负责完成告警规则修复，本周五前提交。"
+        ]
       }
     ]
   },

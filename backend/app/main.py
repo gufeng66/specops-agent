@@ -12,6 +12,7 @@ from app.api.chat import router as chat_router
 from app.api.review import router as review_router
 from app.api.threads import router as threads_router
 from app.config import settings
+from app.llm.runtime import start_llm_runtime, stop_llm_runtime
 from app.memory.checkpoint import close_checkpointer, setup_checkpointer
 from app.memory.store import memory_store
 from app.obs import configure_logging
@@ -21,6 +22,7 @@ from app.obs import configure_logging
 async def lifespan(app: FastAPI):
     """先 SQLite，再绑定带 checkpointer 的图，并回写 chat/review 里的 workflow 单例。"""
     configure_logging()
+    start_llm_runtime()
     await memory_store.init()
     checkpointer = await setup_checkpointer()
     graph = bind_compiled_graph(checkpointer)
@@ -31,11 +33,13 @@ async def lifespan(app: FastAPI):
 
     chat_mod.workflow = SpecOpsWorkflow(memory_store, graph=graph)
     review_mod.workflow = SpecOpsWorkflow(memory_store, graph=graph)
+    await chat_mod.workflow.reconcile_open_requests()
     try:
         yield
     finally:
         reset_compiled_graph()
         await close_checkpointer()
+        await stop_llm_runtime()
 
 
 # 将上面定义好的 lifespan 传入 FastAPI，使得整个启动流程挂钩。

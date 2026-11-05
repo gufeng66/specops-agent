@@ -27,6 +27,7 @@ class MeetingBrief(BaseModel):
 
     goal: str = ""
     stakeholders: list[str] = Field(default_factory=list)
+    discovered_names: list[str] = Field(default_factory=list)
     meeting_date: str = ""
     context: str = ""
 
@@ -75,6 +76,7 @@ class ActionItem(BaseModel):
     secondary_owners: list[str] = Field(default_factory=list)
     deadline: str = ""
     acceptance_criteria: str = ""
+    acceptance_origin: Literal["meeting", "system", "human"] = "meeting"
     evidence_kind: EvidenceKind = EvidenceKind.SOURCE
     evidence_quote: str = ""
     inference_reason: str = ""
@@ -157,6 +159,7 @@ class ThreadStatus(str, Enum):
     PLANNING = "planning"
     AWAITING_REVIEW = "awaiting_review"
     COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class ReviewInfo(BaseModel):
@@ -167,6 +170,9 @@ class ReviewInfo(BaseModel):
     target_item_id: str | None = None
     approved: bool = False
     dropped_item_ids: list[str] = Field(default_factory=list)
+    reviewed_task_count: int = 0
+    edited_item_ids: list[str] = Field(default_factory=list)
+    dropped_task_count: int = 0
 
 
 class ThreadSnapshot(BaseModel):
@@ -175,6 +181,7 @@ class ThreadSnapshot(BaseModel):
     thread_id: str
     status: ThreadStatus = ThreadStatus.IDLE
     source_text: str = ""
+    revision_notes: list[str] = Field(default_factory=list)
     meeting_brief: MeetingBrief = Field(default_factory=MeetingBrief)
     task_draft: TaskDraft = Field(default_factory=TaskDraft)
     validation: ValidationResult = Field(default_factory=ValidationResult)
@@ -185,7 +192,8 @@ class ThreadSnapshot(BaseModel):
     markdown_output: str = ""
     token_in: int = 0
     token_out: int = 0
-    latency_ms: int = 0
+    latency_ms: int = 0  # 成功模型调用耗时之和，不含失败尝试和退避
+    wall_ms: int = 0  # 本次执行段墙钟，不含人工审核停留
     graph_ns: str = ""  # checkpointer 线程键，HITL resume 必须稳定
     prompt_version: str = ""
     created_at: str = ""

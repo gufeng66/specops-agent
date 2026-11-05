@@ -40,6 +40,25 @@ async def test_post_completions_disables_thinking(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_shared_client_post_uses_configured_timeout(monkeypatch):
+    monkeypatch.setattr("app.llm.client.settings.llm_provider", "deepseek")
+    monkeypatch.setattr("app.llm.client.settings.deepseek_api_key", "sk-test")
+    monkeypatch.setattr("app.llm.client.settings.deepseek_base_url", "https://api.deepseek.com")
+    monkeypatch.setattr("app.llm.client.settings.llm_timeout_seconds", 30)
+    captured: dict = {}
+
+    class Shared:
+        async def post(self, url, headers=None, json=None, timeout=None):
+            captured["timeout"] = timeout
+            return Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    monkeypatch.setattr("app.llm.client.shared_client", lambda: Shared())
+    client = LLMClient()
+    await client.post_completions({"messages": [{"role": "user", "content": "hi"}]}, "intake")
+    assert captured["timeout"] == 30
+
+
+@pytest.mark.asyncio
 async def test_post_completions_wall_clock_timeout(monkeypatch):
     monkeypatch.setattr("app.llm.client.settings.llm_provider", "deepseek")
     monkeypatch.setattr("app.llm.client.settings.deepseek_api_key", "sk-test")

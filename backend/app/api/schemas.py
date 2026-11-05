@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import settings
 from app.domain.review_intent import looks_like_drop_feedback
@@ -16,12 +16,15 @@ class ChatStreamRequest(BaseModel):
     thread_id: str | None = None
     request_id: str = Field(min_length=1)
     clarify_response: str | None = None
+    interrupt_id: str | None = None
 
     @model_validator(mode="after")
     def check_source_length(self) -> ChatStreamRequest:
         limit = settings.source_hard_limit_chars
         if len(self.source_text) > limit:
             raise ValueError(f"source_text exceeds {limit} characters")
+        if self.clarify_response and not self.interrupt_id:
+            raise ValueError("interrupt_id is required when clarifying")
         return self
 
 
@@ -30,6 +33,17 @@ class OwnerAssignment(BaseModel):
     item_id: str
     primary_owner: str = ""
     secondary_owners: list[str] = Field(default_factory=list)
+    confirm_owner: bool = False
+
+
+class ItemPatch(BaseModel):
+    """单项字段补丁。没传的键不动；显式空字符串或空列表表示清空。"""
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = None
+    deadline: str | None = None
+    primary_owner: str | None = None
+    secondary_owners: list[str] | None = None
+    acceptance_criteria: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -41,11 +55,19 @@ class ResumeRequest(BaseModel):
     approve: bool = False
     assignments: list[OwnerAssignment] = Field(default_factory=list)
     interrupt_type: str | None = None
+    interrupt_id: str = ""
     drop_item_ids: list[str] = Field(default_factory=list)
+    item_patch: ItemPatch | None = None
 
     @model_validator(mode="after")
     def check_item_scope(self) -> ResumeRequest:
-        if self.assignments or self.approve:
+        if not self.interrupt_id:
+            raise ValueError("interrupt_id is required")
+        if self.item_patch is not None and (
+            self.approve or self.assignments or self.drop_item_ids or self.revision_scope != "item"
+        ):
+            raise ValueError("item_patch must be the only operation in the request")
+        if self.assignments or self.approve or self.item_patch is not None:
             return self
         if self.revision_scope == "drop":
             return self

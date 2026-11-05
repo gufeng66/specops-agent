@@ -17,6 +17,7 @@ class _Bucket:
         self.token_in = 0
         self.token_out = 0
         self.latency_ms = 0
+        self.calls = 0
 
 
 _bucket: ContextVar[_Bucket | None] = ContextVar("llm_bucket", default=None)
@@ -35,6 +36,16 @@ def bind_request(request_id: str, run_id: str) -> Iterator[_Bucket]:
         request_id_var.reset(token_req)
         run_id_var.reset(token_run)
         _bucket.reset(token_bucket)
+
+
+def reserve_llm_call(limit: int) -> None:
+    """每次真实 HTTP 前占用额度，含传输重试和 schema 重试。无请求桶时不限制。"""
+    bucket = _bucket.get()
+    if bucket is None:
+        return
+    if bucket.calls >= limit:
+        raise RuntimeError("llm call budget exhausted")
+    bucket.calls += 1
 
 
 def add_llm_usage(prompt_tokens: int, completion_tokens: int, latency_ms: int) -> None:

@@ -11,8 +11,10 @@ export interface BoardItem {
   secondary_owners: string[]
   deadline?: string
   acceptance_criteria?: string
+  acceptance_origin?: string
   evidence_kind?: string
   evidence_quote?: string
+  inference_reason?: string
   unresolved_ref?: string
 }
 
@@ -59,79 +61,94 @@ function unassigned(): BoardItem[] {
 
 <template>
   <div class="board">
-    <p class="locate-help">点击任务可在左侧原文中选中对应句子</p>
+    <p class="locate-help">点击任务可查看对应原文</p>
     <section v-for="group in groups()" :key="group.name" class="person-col">
       <h4 class="person-name">{{ group.name }}</h4>
-      <div
+      <button
         v-for="item in group.primary"
         :key="item.id + '-p'"
+        type="button"
         class="task-card"
         :class="{ selected: selectedId === item.id }"
         @click="emit('select', item)"
       >
+        <span v-if="selectedId === item.id" class="current-flag">当前选中</span>
         <span class="role-tag role-primary">主责</span>
-        <h4>{{ item.title }}</h4>
-        <p v-if="item.deadline"><strong>截止：</strong>{{ item.deadline }}</p>
-        <p v-if="item.acceptance_criteria"><strong>验收：</strong>{{ item.acceptance_criteria }}</p>
-        <p v-if="item.evidence_quote" class="quote">{{ item.evidence_quote }}</p>
-      </div>
-      <div
+        <span class="task-title">{{ item.title }}</span>
+        <span v-if="item.deadline" class="line">截止日期：{{ item.deadline }}</span>
+        <span v-if="item.acceptance_criteria" class="line">验收标准：{{ item.acceptance_criteria }}</span>
+        <span v-if="item.acceptance_origin === 'system'" class="line">验收标准是系统建议</span>
+        <span v-if="item.evidence_kind === 'inference'" class="line">推断<span v-if="item.inference_reason">：{{ item.inference_reason }}</span></span>
+        <span v-if="selectedId === item.id && item.evidence_quote" class="line quote">依据：{{ item.evidence_quote }}</span>
+      </button>
+      <button
         v-for="item in group.secondary"
         :key="item.id + '-s'"
+        type="button"
         class="task-card secondary"
         :class="{ selected: selectedId === item.id }"
         @click="emit('select', item)"
       >
+        <span v-if="selectedId === item.id" class="current-flag">当前选中</span>
         <span class="role-tag role-secondary">次责</span>
-        <h4>{{ item.title }}</h4>
-        <p><strong>主责：</strong>{{ item.primary_owner || '—' }}</p>
-        <p v-if="item.evidence_quote" class="quote">{{ item.evidence_quote }}</p>
-      </div>
+        <span class="task-title">{{ item.title }}</span>
+        <span class="line">主责：{{ item.primary_owner || '—' }}</span>
+        <span v-if="item.acceptance_origin === 'system'" class="line">验收标准是系统建议</span>
+        <span v-if="item.evidence_kind === 'inference'" class="line">推断<span v-if="item.inference_reason">：{{ item.inference_reason }}</span></span>
+        <span v-if="selectedId === item.id && item.evidence_quote" class="line quote">依据：{{ item.evidence_quote }}</span>
+      </button>
     </section>
     <section v-if="unassigned().length" class="person-col unassigned">
       <h4 class="person-name">待分配</h4>
-      <div
+      <button
         v-for="item in unassigned()"
         :key="item.id"
+        type="button"
         class="task-card"
         :class="{ selected: selectedId === item.id }"
         @click="emit('select', item)"
       >
+        <span v-if="selectedId === item.id" class="current-flag">当前选中</span>
         <span v-if="item.unresolved_ref" class="role-tag role-ref">原文未点名 · {{ item.unresolved_ref }}</span>
-        <h4>{{ item.title }}</h4>
-        <p v-if="item.evidence_quote" class="quote">{{ item.evidence_quote }}</p>
-      </div>
+        <span class="task-title">{{ item.title }}</span>
+        <span v-if="item.evidence_kind === 'inference'" class="line">推断<span v-if="item.inference_reason">：{{ item.inference_reason }}</span></span>
+        <span v-if="selectedId === item.id && item.evidence_quote" class="line quote">依据：{{ item.evidence_quote }}</span>
+      </button>
     </section>
   </div>
 </template>
 
 <style scoped>
-.locate-help { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.65rem; }
-.person-col { margin-bottom: 1rem; }
-.person-name { font-size: 0.95rem; margin-bottom: 0.5rem; }
+.locate-help { font-size: 0.875rem; color: var(--muted); margin-bottom: 0.75rem; }
+.person-col { margin-bottom: 1.25rem; }
+.person-name { font-size: 1rem; margin-bottom: 0.35rem; }
 .task-card {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.85rem;
-  margin-bottom: 0.65rem;
-  cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 0.85rem 0.35rem;
+  margin-bottom: 0;
+  background: transparent;
 }
-.task-card:hover, .task-card.selected { border-color: var(--accent); }
-.task-card.selected { box-shadow: 0 0 0 1px rgba(61, 139, 253, 0.35); }
-.task-card.secondary { opacity: 0.92; }
-.task-card h4 { font-size: 0.9rem; margin: 0.35rem 0; }
-.task-card p { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.2rem; }
-.quote { font-size: 0.75rem; color: var(--text-muted); }
+.task-card:hover { background: var(--bg); }
+.task-card.selected { background: var(--selected); border-color: var(--primary); }
+.task-title, .line { display: block; overflow-wrap: anywhere; }
+.task-title { font-size: 1rem; font-weight: 650; margin: 0.35rem 0; color: var(--ink); }
+.line { font-size: 0.875rem; color: var(--muted); margin-bottom: 0.2rem; }
+.quote { font-size: 0.875rem; }
+.current-flag { display: inline-block; margin-right: 0.35rem; color: var(--primary); font-size: 0.875rem; font-weight: 650; }
 .role-tag {
   display: inline-block;
-  font-size: 0.75rem;
-  font-weight: 700;
-  padding: 0.15rem 0.4rem;
-  border-radius: 4px;
+  font-size: 0.875rem;
+  font-weight: 650;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
 }
-.role-primary { background: rgba(52, 199, 89, 0.18); color: var(--success); }
-.role-secondary { background: rgba(61, 139, 253, 0.18); color: #7eb6ff; }
-.role-ref { background: rgba(255, 176, 32, 0.2); color: var(--warn); }
-.unassigned { border-top: 1px dashed var(--border); padding-top: 0.75rem; }
+.role-primary { background: var(--ok-bg); color: var(--ok); }
+.role-secondary { background: var(--selected); color: var(--primary); }
+.role-ref { background: var(--amber-bg); color: var(--amber); }
+.unassigned { border-top: 1px solid var(--line); padding-top: 0.75rem; }
 </style>

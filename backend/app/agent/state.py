@@ -28,6 +28,7 @@ class AgentState(TypedDict, total=False):
     thread_id: str
     run_id: str
     source_text: str
+    revision_notes: list
     meeting_brief: dict
     task_draft: dict
     validation: dict
@@ -55,6 +56,7 @@ def snapshot_to_state(snapshot: ThreadSnapshot, **overrides: Any) -> AgentState:
         "thread_id": snapshot.thread_id,
         "run_id": snapshot.run_id,
         "source_text": snapshot.source_text,
+        "revision_notes": list(snapshot.revision_notes),
         "meeting_brief": snapshot.meeting_brief.model_dump(mode="json"),
         "task_draft": snapshot.task_draft.model_dump(mode="json"),
         "validation": snapshot.validation.model_dump(mode="json"),
@@ -81,14 +83,18 @@ def state_to_snapshot(state: AgentState, base: ThreadSnapshot | None = None) -> 
     snap = base.model_copy(deep=True) if base else ThreadSnapshot(thread_id=thread_id)
     snap.thread_id = thread_id
     snap.run_id = state.get("run_id") or snap.run_id
-    snap.source_text = state.get("source_text") or snap.source_text
+    if "source_text" in state:
+        snap.source_text = state.get("source_text") or ""
+    if "revision_notes" in state:
+        snap.revision_notes = list(state.get("revision_notes") or [])
     if state.get("meeting_brief") is not None:
         snap.meeting_brief = MeetingBrief.model_validate(state["meeting_brief"])
     if state.get("task_draft") is not None:
         snap.task_draft = TaskDraft.model_validate(state["task_draft"])
     if state.get("validation") is not None:
         snap.validation = ValidationResult.model_validate(state["validation"])
-    snap.markdown_output = state.get("markdown_output") or snap.markdown_output
+    if "markdown_output" in state:
+        snap.markdown_output = state.get("markdown_output") or ""
     status = state.get("status")
     if status:
         snap.status = ThreadStatus(status)

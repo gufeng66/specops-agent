@@ -10,7 +10,10 @@
           "更新"
         ],
         "primary_owner": "李娜",
-        "secondary_owners": []
+        "secondary_owners": [],
+        "evidence_spans": [
+          "接口说明本周内需要完成更新并发布到内部 Wiki。"
+        ]
       }
     ]
   },

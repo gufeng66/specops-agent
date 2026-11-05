@@ -116,7 +116,7 @@ async def run_case(
 
     seen: list[str] = []
     async for _ in wf.run_chat(
-        snap, case["source_text"], f"{case_id}-0", eval_mode=mode
+        snap, case["source_text"], f"{case_id}-{mode}-0", eval_mode=mode
     ):
         pass
 
@@ -141,20 +141,24 @@ async def run_case(
         if itype == "clarify":
             text = str((case.get("gold") or {}).get("clarify") or "补充会议目标")
             async for _ in wf.run_chat(
-                snap, snap.source_text, f"{case_id}-c{step}", clarify_response=text, eval_mode=mode
+                snap,
+                snap.source_text,
+                f"{case_id}-{mode}-c{step}",
+                clarify_response=text,
+                eval_mode=mode,
             ):
                 pass
             continue
         if itype == "assign_owners":
             assignments = _assignments_for(snap, case)
             async for _ in wf.resume(
-                snap, "item", None, "", False, f"{case_id}-a{step}", assignments=assignments
+                snap, "item", None, "", False, f"{case_id}-{mode}-a{step}", assignments=assignments
             ):
                 pass
             continue
         if itype == "review":
             item_id = snap.task_draft.items[0].id if snap.task_draft.items else None
-            async for _ in wf.resume(snap, "item", item_id, "", True, f"{case_id}-r{step}"):
+            async for _ in wf.resume(snap, "item", item_id, "", True, f"{case_id}-{mode}-r{step}"):
                 pass
             continue
 

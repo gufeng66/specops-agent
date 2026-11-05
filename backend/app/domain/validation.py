@@ -26,6 +26,14 @@ OWNER_ERROR_CODES = frozenset(
         "UNRESOLVED_REFERENCE",
     }
 )
+UNREPAIRABLE_CODES = OWNER_ERROR_CODES | frozenset(
+    {
+        "MISSING_EVIDENCE_QUOTE",
+        "INVALID_EVIDENCE_QUOTE",
+        "MISSING_INFERENCE_REASON",
+        "EMPTY_TASK_LIST",
+    }
+)
 
 
 def has_owner_errors(validation: ValidationResult) -> bool:
@@ -199,7 +207,7 @@ def validate_task_draft(
                     field="primary_owner",
                 )
             )
-        elif stakeholders and primary not in stakeholders:
+        elif primary not in stakeholders:
             issues.append(
                 ValidationIssue(
                     code="INVALID_PRIMARY",
@@ -210,7 +218,7 @@ def validate_task_draft(
                 )
             )
         for secondary in secondaries:
-            if stakeholders and secondary not in stakeholders:
+            if secondary not in stakeholders:
                 issues.append(
                     ValidationIssue(
                         code="INVALID_SECONDARY",
@@ -252,20 +260,9 @@ def repair_item(item: ActionItem, issue: ValidationIssue, source_text: str) -> A
 
     if code == "MISSING_ACCEPTANCE":
         patched.acceptance_criteria = f"完成「{patched.title or '任务'}」并经过干系人确认"
-    elif code == "MISSING_EVIDENCE_QUOTE" and source_text:
-        sentences = [s.strip() for s in source_text.replace("。", "。\n").split("\n") if s.strip()]
-        if sentences:
-            patched.evidence_quote = sentences[0][:120]
-            patched.evidence_kind = EvidenceKind.SOURCE
-    elif code == "INVALID_EVIDENCE_QUOTE":
-        if patched.title and patched.title in source_text:
-            patched.evidence_quote = patched.title
-        else:
-            patched.evidence_kind = EvidenceKind.INFERENCE
-            patched.inference_reason = patched.inference_reason or "根据会议上下文推断"
-            patched.evidence_quote = ""
-    elif code in OWNER_ERROR_CODES:
-        return patched
+        patched.acceptance_origin = "system"
+    elif code in UNREPAIRABLE_CODES:
+        return item
     elif code == "MISSING_TITLE":
         patched.title = patched.description[:40] if patched.description else "待补充任务"
 
@@ -281,12 +278,16 @@ def apply_repairs(
     items_by_id = {item.id: item for item in draft.items}
     error_issues = validation.error_issues
 
+    changed = False
     for issue in error_issues:
-        if issue.code == "EMPTY_TASK_LIST":
-            continue
-        if issue.code in OWNER_ERROR_CODES:
+        if issue.code in UNREPAIRABLE_CODES:
             continue
         if issue.item_id and issue.item_id in items_by_id:
-            items_by_id[issue.item_id] = repair_item(items_by_id[issue.item_id], issue, source_text)
+            repaired = repair_item(items_by_id[issue.item_id], issue, source_text)
+            if repaired.model_dump() != items_by_id[issue.item_id].model_dump():
+                items_by_id[issue.item_id] = repaired
+                changed = True
 
+    if not changed:
+        return draft
     return TaskDraft(items=list(items_by_id.values()), version=draft.version + 1)

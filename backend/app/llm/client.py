@@ -29,7 +29,8 @@ from app.config import settings
 from app.domain.chunking import sample_for_brief
 from app.domain.models import ActionItemList, MeetingBriefExtract, OwnerSuggestionBatch
 from app.llm.errors import LLMAPIError, LLMConfigError, LLMError, LLMParseError, LLMTimeoutError
-from app.obs import add_llm_usage
+from app.llm.runtime import http_slot, shared_client
+from app.obs import add_llm_usage, reserve_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +72,14 @@ class LLMClient:
         slept = 0.0
         last_error: LLMAPIError | None = None
         for attempt in range(attempts):
+            try:
+                reserve_llm_call(settings.llm_max_calls_per_run)
+            except RuntimeError as exc:
+                raise LLMAPIError(str(exc), status_code=429) from exc
             started = time.perf_counter()
             try:
-                data = await self._post_once(payload, node)
+                async with http_slot():
+                    data = await self._post_once(payload, node)
             except LLMTimeoutError:
                 raise
             except LLMAPIError as exc:
@@ -95,19 +101,30 @@ class LLMClient:
 
     async def _post_once(self, payload: dict[str, Any], node: str) -> dict[str, Any]:
         timeout_s = settings.llm_timeout_seconds
+        client = shared_client()
+        owned = client is None
+        if owned:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_s))
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
+            try:
                 resp = await asyncio.wait_for(
-                    client.post(self._completions_url(), headers=self._headers(), json=payload),
+                    client.post(
+                        self._completions_url(),
+                        headers=self._headers(),
+                        json=payload,
+                        timeout=timeout_s,
+                    ),
                     timeout=timeout_s,
                 )
-        except TimeoutError as exc:
-            raise LLMTimeoutError(f"{node}: timeout after {timeout_s}s") from exc
-        except httpx.TimeoutException as exc:
-            raise LLMTimeoutError(f"{node}: timeout after {timeout_s}s") from exc
-        except httpx.HTTPError as exc:
-            raise LLMAPIError(f"{node}: transport error: {exc}") from exc
-
+            except TimeoutError as exc:
+                raise LLMTimeoutError(f"{node}: timeout after {timeout_s}s") from exc
+            except httpx.TimeoutException as exc:
+                raise LLMTimeoutError(f"{node}: timeout after {timeout_s}s") from exc
+            except httpx.HTTPError as exc:
+                raise LLMAPIError(f"{node}: transport error: {exc}") from exc
+        finally:
+            if owned:
+                await client.aclose()
         if resp.status_code >= 400:
             raise LLMAPIError(
                 f"{node}: HTTP {resp.status_code}: {resp.text[:300]}",
@@ -127,7 +144,9 @@ class LLMClient:
             await asyncio.sleep(delay)
         return delay
 
-    async def structured_extract_brief(self, source_text: str) -> MeetingBriefExtract | None:
+    async def structured_extract_brief(
+        self, source_text: str, revision_notes: list[str] | None = None
+    ) -> MeetingBriefExtract | None:
         """intake：失败返回 None，由节点保留规则底稿。"""
         if not self.enabled:
             return None
@@ -135,7 +154,7 @@ class LLMClient:
             window = sample_for_brief(source_text, settings.llm_brief_max_chars)
             return await self.chat_json(
                 system=INTAKE_SYSTEM,
-                user=INTAKE_USER.format(source_text=window),
+                user=INTAKE_USER.format(source_text=window) + _note_block(revision_notes),
                 model_cls=MeetingBriefExtract,
                 node="intake",
             )
@@ -143,7 +162,12 @@ class LLMClient:
             logger.warning("LLM intake failed [%s]: %s — falling back to rules", exc.code, exc.message)
             return None
 
-    async def structured_decompose(self, source_text: str, brief_json: str) -> ActionItemList | None:
+    async def structured_decompose(
+        self,
+        source_text: str,
+        brief_json: str,
+        revision_notes: list[str] | None = None,
+    ) -> ActionItemList | None:
         """单块拆解。超长块截断到 llm_chunk_chars，完整长文由节点分块 gather。"""
         if not self.enabled:
             return None
@@ -154,7 +178,8 @@ class LLMClient:
                 window = window[: settings.llm_chunk_chars]
             return await self.chat_json(
                 system=DECOMPOSE_SYSTEM,
-                user=DECOMPOSE_USER.format(brief_json=brief_json, source_text=window),
+                user=DECOMPOSE_USER.format(brief_json=brief_json, source_text=window)
+                + _note_block(revision_notes),
                 model_cls=ActionItemList,
                 node="decompose",
             )
@@ -251,6 +276,13 @@ class LLMClient:
         if not isinstance(message, dict):
             raise LLMParseError(f"{node}: assistant message is not an object")
         return message
+
+
+def _note_block(notes: list[str] | None) -> str:
+    """修订意见跟在提示后面，不写进会议原文。"""
+    if not notes:
+        return ""
+    return "\n\n人工修订意见（不是会议原文，不得当作证据引用）：\n" + "\n".join(notes)
 
 
 def _retryable_status(status: int | None) -> bool:

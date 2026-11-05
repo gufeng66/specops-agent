@@ -51,10 +51,10 @@ async def test_hard_replay(tmp_path, monkeypatch):
                     result["stakeholders"],
                 )
                 floor = expected[mode][case["id"]]
-                assert row["recall"] >= floor["min_recall"]
-                assert row["precision"] >= floor["min_precision"]
-                assert row["evidence_valid_rate"] >= floor["min_evidence_valid_rate"]
-                assert row["owner_hallucination_rate"] <= floor["max_owner_hallucination_rate"]
+                assert row["recall"] >= floor["min_recall"], (mode, case["id"], row)
+                assert row["precision"] >= floor["min_precision"], (mode, case["id"], row)
+                assert row["evidence_valid_rate"] >= floor["min_evidence_valid_rate"], (mode, case["id"], row)
+                assert row["owner_hallucination_rate"] <= floor["max_owner_hallucination_rate"], (mode, case["id"], row)
                 assert result["prompt_version"] == PROMPT_VERSION
                 if case["id"] == "injection":
                     assert all(item.primary_owner != "张三" for item in result["scored_items"])

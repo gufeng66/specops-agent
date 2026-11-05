@@ -187,6 +187,11 @@ def rule_extract_brief(source_text: str) -> MeetingBrief:
             if name and name not in stakeholders:
                 stakeholders.append(name)
         dialogue_m = re.match(r"^([\u4e00-\u9fff]{2,4})[：:]\s*\S", line)
+        latin_m = re.match(r"^([A-Za-z][A-Za-z.'-]{1,30})[：:]\s*\S", line)
+        if latin_m and not dialogue_m:
+            name = latin_m.group(1).strip()
+            if name and name not in stakeholders:
+                stakeholders.append(name)
         if dialogue_m:
             name = dialogue_m.group(1).strip()
             skip = {
@@ -303,6 +308,20 @@ def detect_unresolved_ref(sent: str, stakeholders: list[str]) -> str:
     return ""
 
 
+_SENTENCE_SKIP = re.compile(r"暂不|不再执行|不再推进|不形成|未决定|只讨论")
+_CLAUSE_SKIP = re.compile(r"先讨论")
+
+
+def _executable_clauses(sent: str) -> list[str]:
+    """整句被否定时不成任务。只把「先讨论」分句拆开，留下后面的执行承诺。"""
+    if _SENTENCE_SKIP.search(sent):
+        return []
+    if not _CLAUSE_SKIP.search(sent):
+        return [sent] if _has_action_keyword(sent) else []
+    parts = [part.strip() for part in re.split(r"[，,；;]|然后", sent) if part.strip()]
+    return [part for part in parts if _has_action_keyword(part) and not _CLAUSE_SKIP.search(part)]
+
+
 def rule_decompose(source_text: str, brief: MeetingBrief) -> TaskDraft:
     """规则拆解：只把含行动动词的句子做成任务；引用就是原句，不编造。"""
     items: list[ActionItem] = []
@@ -338,8 +357,10 @@ def rule_decompose(source_text: str, brief: MeetingBrief) -> TaskDraft:
     for sent in sentences:
         if not _has_action_keyword(sent):
             continue
-        if len(sent) < 4:
+        clauses = _executable_clauses(sent)
+        if not clauses or len(sent) < 4:
             continue
+        focus = clauses[0] if len(clauses) == 1 and clauses[0] in sent else sent
 
         primary, secondaries = extract_owners_from_sentence(sent, brief.stakeholders)
         unresolved_ref = detect_unresolved_ref(sent, brief.stakeholders)
@@ -350,8 +371,8 @@ def rule_decompose(source_text: str, brief: MeetingBrief) -> TaskDraft:
         deadline_m = re.search(DEADLINE_PATTERN, sent)
         deadline = deadline_m.group(1) if deadline_m else ""
 
-        title = _short_title(sent, deadline)
-        quote = sent
+        title = _short_title(focus, deadline)
+        quote = focus if focus in source_text else sent
         if quote not in source_text:
             for chunk in [sent, sent.rstrip("。"), sent + "。"]:
                 if chunk in source_text:
@@ -366,11 +387,12 @@ def rule_decompose(source_text: str, brief: MeetingBrief) -> TaskDraft:
         items.append(
             ActionItem(
                 title=title,
-                description=sent,
+                description=focus,
                 primary_owner=primary,
                 secondary_owners=secondaries,
                 deadline=deadline,
                 acceptance_criteria=f"「{title}」已完成并通过确认",
+                acceptance_origin="system",
                 evidence_kind=EvidenceKind.SOURCE,
                 evidence_quote=quote,
                 unresolved_ref=unresolved_ref,
@@ -380,20 +402,83 @@ def rule_decompose(source_text: str, brief: MeetingBrief) -> TaskDraft:
     return TaskDraft(items=items)
 
 
-def patch_target_item(draft: TaskDraft, item_id: str, feedback: str) -> TaskDraft:
-    """审核单项修订：只改目标条目描述，其它 UUID 保持不变。"""
+_PATCH_FIELDS = ("title", "deadline", "primary_owner", "secondary_owners", "acceptance_criteria")
+
+
+def patch_target_item(draft: TaskDraft, item_id: str, patch: dict | None) -> tuple[TaskDraft, bool]:
+    """按白名单改字段。返回 (草案, 是否真的改了值)。目标不存在时草案不变且 changed=False。"""
+    fields = {key: patch[key] for key in _PATCH_FIELDS if patch and key in patch}
     new_items: list[ActionItem] = []
+    found = False
+    changed = False
     for item in draft.items:
         if item.id != item_id:
             new_items.append(item.model_copy(deep=True))
             continue
+        found = True
         patched = item.model_copy(deep=True)
-        if feedback.strip():
-            patched.description = f"{patched.description}\n[修订反馈] {feedback.strip()}".strip()
-            if not patched.acceptance_criteria.endswith("（已修订）"):
-                patched.acceptance_criteria = f"{patched.acceptance_criteria}（已修订）"
+        if "title" in fields:
+            patched.title = str(fields["title"] or "")
+        if "deadline" in fields:
+            patched.deadline = str(fields["deadline"] or "")
+        if "primary_owner" in fields:
+            patched.primary_owner = str(fields["primary_owner"] or "")
+            if patched.primary_owner:
+                patched.unresolved_ref = ""
+        if "secondary_owners" in fields:
+            owners = fields["secondary_owners"] or []
+            patched.secondary_owners = [str(s).strip() for s in owners if str(s).strip()]
+        if "acceptance_criteria" in fields:
+            patched.acceptance_criteria = str(fields["acceptance_criteria"] or "")
+            patched.acceptance_origin = "human"
+        if patched.model_dump() != item.model_dump():
+            changed = True
         new_items.append(patched)
-    return TaskDraft(items=new_items, version=draft.version + 1)
+    if not found or not changed:
+        return draft, False
+    return TaskDraft(items=new_items, version=draft.version + 1), True
+
+
+def trust_edited_names(
+    brief: MeetingBrief,
+    before: ActionItem,
+    after: ActionItem,
+    *,
+    confirm: bool,
+) -> MeetingBrief:
+    """只把改过的、或调用方明确勾选的姓名写入可信名单。"""
+    names = list(brief.stakeholders)
+    candidates = []
+    if after.primary_owner != before.primary_owner or confirm:
+        candidates.append(after.primary_owner)
+    if list(after.secondary_owners) != list(before.secondary_owners) or confirm:
+        candidates.extend(after.secondary_owners)
+    for name in candidates:
+        if name and name not in names:
+            names.append(name)
+    out = brief.model_copy(deep=True)
+    out.stakeholders = names
+    return out
+
+
+def apply_revision_deletions(draft: TaskDraft, notes: list[str]) -> TaskDraft:
+    """规则路径只认「删除/去掉/不要 + 标题片段」。其余意见留给模型提示。"""
+    frags: list[str] = []
+    for note in notes:
+        for match in re.finditer(r"(?:删除|去掉|不要)([^，。；\n]{1,40})", note):
+            frag = match.group(1).strip(" 「」\"'")
+            if frag:
+                frags.append(frag)
+    if not frags:
+        return draft
+    kept = [
+        item
+        for item in draft.items
+        if not any(frag in (item.title or "") or frag in (item.description or "") for frag in frags)
+    ]
+    if len(kept) == len(draft.items):
+        return draft
+    return TaskDraft(items=kept, version=draft.version + 1)
 
 
 def apply_owner_assignments(

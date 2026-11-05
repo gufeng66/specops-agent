@@ -1,0 +1,13 @@
+{
+  "id": "neg_undecided",
+  "source_text": "会议目标：方案会\n参会人：李娜\n支付改造只讨论，今天不形成任务。",
+  "expect": {
+    "needs_clarify": false,
+    "needs_assignment": false,
+    "items": []
+  },
+  "gold": {
+    "clarify": "",
+    "assignments": []
+  }
+}
