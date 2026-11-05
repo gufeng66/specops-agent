@@ -91,3 +91,23 @@ $RECYCLE.BIN/
 
 # Local architecture review dumps
 .archify/
+
+# 本地 AI 助手工作记录（面试复盘、源码阅读笔记等），不属于项目本身
+.workbuddy/
+
+# 本地测试/构建临时目录与缓存，每次跑测试都会重新生成
+.tmpx/
+.pytest_tmp/
+.tmp_pytest_run/
+.tmp_r2/
+tmp_*/
+scratch/
+
+# Playwright / Vitest 运行时产物
+frontend/playwright/.cache/
+frontend/coverage/
+.vitest/
+
+# 本地编辑器与语言服务
+.vscode-test/
+*.code-workspace
