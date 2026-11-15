@@ -26,6 +26,7 @@ from app.agent.graph import get_compiled_graph
 from app.agent.prompts import PROMPT_VERSION
 from app.agent.state import snapshot_to_state, state_to_snapshot
 from app.domain.models import ThreadSnapshot, ThreadStatus
+from app.domain.review_intent import normalize_override_inputs
 from app.memory.store import ClaimOutcome, ClaimResult, MemoryStore
 from app.obs import bind_request, flush_metrics
 
@@ -164,8 +165,25 @@ class SpecOpsWorkflow:
         interrupt_id: str | None = None,
         interrupt_type: str | None = None,
         item_patch: dict[str, Any] | None = None,
+        override_reason: str | None = None,
+        operator_claim: str = "",
     ) -> AsyncIterator[str]:
         """分配/审核续跑。assignments 只在人确认后进入图，建议字段不会从这里写入主责。"""
+        try:
+            override_reason, operator_claim = normalize_override_inputs(
+                override_reason, operator_claim
+            )
+            if override_reason is not None and not approve:
+                raise ValueError("override_reason requires approve=true")
+        except ValueError as exc:
+            yield emit_error(
+                str(exc),
+                code="INVALID_OVERRIDE_INPUT",
+                thread_id=snapshot.thread_id,
+                run_id=snapshot.run_id,
+            )
+            yield emit_done()
+            return
         iid = snapshot.interrupt_id if interrupt_id is None else interrupt_id
         itype = interrupt_type or str((snapshot.interrupt_payload or {}).get("type") or "")
         payload = {
@@ -178,6 +196,9 @@ class SpecOpsWorkflow:
             "interrupt_id": iid,
             "interrupt_type": itype,
             "item_patch": item_patch,
+            # 放行理由进入 digest：同 request_id 换理由必须被识别为不同请求。
+            "override_reason": override_reason,
+            "operator_claim": operator_claim,
         }
         claimed = await self._claim_for_run(
             snapshot,
@@ -208,6 +229,8 @@ class SpecOpsWorkflow:
                     "assignments": assignments or [],
                     "drop_item_ids": drop_item_ids or [],
                     "item_patch": item_patch,
+                    "override_reason": override_reason,
+                    "operator_claim": operator_claim,
                 }
                 async for event in self._stream_graph(
                     snapshot,
@@ -255,8 +278,27 @@ class SpecOpsWorkflow:
         return result.snapshot
 
     async def _reject_stream(self, result: ClaimResult) -> AsyncIterator[str]:
-        yield emit_error(result.message or result.code or "请求被拒绝")
+        yield emit_error(result.message or result.code or "请求被拒绝", code=result.code)
         yield emit_done()
+
+    async def _finish_conflict_event(
+        self,
+        request_id: str,
+        snapshot: ThreadSnapshot,
+        run_id: str,
+        code: str,
+    ) -> str:
+        stable_code = code if code in {"SNAPSHOT_CONFLICT", "LEASE_LOST"} else "SNAPSHOT_CONFLICT"
+        try:
+            await self.store.abort_request(request_id, stable_code)  # type: ignore[arg-type]
+        except Exception:
+            logger.exception("failed to release rejected request lease request=%s", request_id)
+        return emit_error(
+            "服务端状态已更新，请重新查询",
+            code=stable_code,
+            thread_id=snapshot.thread_id,
+            run_id=run_id,
+        )
 
     async def _persist_aligned(
         self,
@@ -275,7 +317,31 @@ class SpecOpsWorkflow:
         aligned.run_id = run_id or aligned.run_id
         aligned.wall_ms = int((time.perf_counter() - started) * 1000)
         flush_metrics(aligned)
-        await self.store.finish_request(request_id, aligned, request_status="failed")
+        # 带版本写回：迟到的旧执行不能覆盖已经前进的快照。
+        # 写库本身失败时只记日志，绝不能再向外抛：本方法会在 run_chat / resume 的
+        # except 分支里被调用，二次抛异常会吞掉 emit_error / emit_done，让 SSE 停在半截流。
+        try:
+            finished = await self.store.finish_request(
+                request_id,
+                aligned,
+                request_status="failed",
+                expected_revision=snapshot.revision,
+            )
+        except Exception:
+            logger.exception("persist aligned snapshot failed; SSE will still close cleanly")
+            finished = None
+        if finished is None or not finished.applied:
+            # 类型化 code 让调用方能区分版本冲突与租约丢失；当前执行段的收尾只记日志，
+            # 不把冲突伪装成成功，也不覆盖新快照。
+            logger.warning(
+                "snapshot write rejected code=%s (stale revision or lease lost)",
+                finished.code if finished is not None else "WRITE_ERROR",
+            )
+            if finished is not None and finished.code:
+                try:
+                    await self.store.abort_request(request_id, finished.code)
+                except Exception:
+                    logger.exception("failed to release rejected request lease request=%s", request_id)
 
     async def _finish_cancelled(
         self,
@@ -344,7 +410,22 @@ class SpecOpsWorkflow:
                 continue
             aligned = await self.align_snapshot(snap)
             aligned.run_id = row.run_id or aligned.run_id
-            await self.store.finish_request(row.request_id, aligned, request_status="failed")
+            finished = await self.store.finish_request(
+                row.request_id, aligned, request_status="failed", expected_revision=snap.revision
+            )
+            if not finished.applied:
+                # 对账的目的是解除崩溃遗留的租约。CAS 不匹配时仍要释放，否则这个线程
+                # 会永远停留在“正在处理”。覆盖前已确认租约仍属于该请求（finish_request
+                # 自带 lease 条件），所以这里不带版本号重放一次是安全的。
+                logger.warning(
+                    "reconcile CAS mismatch code=%s thread=%s request=%s; releasing stale lease",
+                    finished.code,
+                    row.thread_id,
+                    row.request_id,
+                )
+                await self.store.finish_request(
+                    row.request_id, aligned, request_status="failed"
+                )
             fixed += 1
         return fixed
 
@@ -385,6 +466,7 @@ class SpecOpsWorkflow:
         values["run_id"] = run_id
         values["thread_id"] = snapshot.thread_id
         values["graph_ns"] = ns
+        checkpoint_id = self._checkpoint_id(graph_state)
 
         interrupts = self._extract_interrupts(graph_state)
         if interrupts:
@@ -394,24 +476,64 @@ class SpecOpsWorkflow:
             values["interrupt_payload"] = payload
             snap = state_to_snapshot(values, snapshot)
             snap.graph_ns = ns
+            snap.checkpoint_id = checkpoint_id
             snap.interrupt_payload = payload
             flush_metrics(snap)
             snap.wall_ms = int((time.perf_counter() - started) * 1000)
-            await self.store.finish_request(request_id, snap, request_status="succeeded")
+            finished = await self.store.finish_request(
+                request_id,
+                snap,
+                request_status="succeeded",
+                expected_revision=snapshot.revision,
+            )
+            if not finished.applied:
+                yield await self._finish_conflict_event(
+                    request_id, snap, run_id, finished.code
+                )
+                yield emit_done()
+                return
             hitl_node = str(payload.get("type") or "review")
             yield emit_progress(hitl_node, str(payload.get("message") or "等待人工操作"), status="waiting")
-            yield emit_interrupt(payload)
+            # SSE interrupt 帧带上线程/运行/版本，让前端能用与 result 相同的门禁判断
+            # 迟到帧（旧 run、旧 revision、已完成线程）不该把页面拉回审核页。
+            # 快照里的 interrupt_payload 仍是节点原始内容，不改领域语义。
+            sse_interrupt = {
+                **payload,
+                "thread_id": snap.thread_id,
+                "run_id": snap.run_id,
+                "revision": snap.revision,
+            }
+            yield emit_interrupt(sse_interrupt)
             yield emit_result(snap.model_dump(mode="json"))
             yield emit_done()
             return
 
         snap = state_to_snapshot(values, snapshot)
         snap.graph_ns = ns
+        snap.checkpoint_id = checkpoint_id
         flush_metrics(snap)
         snap.wall_ms = int((time.perf_counter() - started) * 1000)
-        await self.store.finish_request(request_id, snap, request_status="succeeded")
+        finished = await self.store.finish_request(
+            request_id,
+            snap,
+            request_status="succeeded",
+            expected_revision=snapshot.revision,
+        )
+        if not finished.applied:
+            yield await self._finish_conflict_event(request_id, snap, run_id, finished.code)
+            yield emit_done()
+            return
         yield emit_result(snap.model_dump(mode="json"))
         yield emit_done()
+
+    @staticmethod
+    def _checkpoint_id(graph_state: Any) -> str:
+        """从 checkpoint 配置里取 checkpoint_id，便于把图位置和业务快照对上。"""
+        config = getattr(graph_state, "config", None) or {}
+        configurable = config.get("configurable") if isinstance(config, dict) else None
+        if isinstance(configurable, dict):
+            return str(configurable.get("checkpoint_id") or "")
+        return ""
 
     @staticmethod
     def _pending_to_sse(ev: dict[str, Any]) -> str | None:

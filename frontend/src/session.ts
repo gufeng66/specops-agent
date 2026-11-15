@@ -18,6 +18,75 @@ export function acceptResponse(seq: number, current: number): boolean {
   return seq === current
 }
 
+/**
+ * 快照里与「这次响应是否还属于当前页面」相关的字段。
+ * 服务端会把中断相关字段写成 null（例如已结束的执行），所以这里允许 null：
+ * 下面几个判断都先做 String(... || '') 归一，null 与缺失等价。
+ */
+export interface SnapshotRef {
+  thread_id?: string | null
+  run_id?: string | null
+  status?: string | null
+  revision?: number | null
+  interrupt_id?: string | null
+  interrupt_payload?: Record<string, unknown> | null
+}
+
+export interface SnapshotMeta {
+  /** 发起这次请求时的代次。 */
+  seq: number
+  /** 当前代次。两者不等说明用户已经开了新的一次执行。 */
+  currentSeq: number
+  /** 当前页面对应的线程；null 表示还没确定，不做约束。 */
+  threadId: string | null
+  /** 当前页面已认下的 run_id；null 表示还没确定，不做约束。 */
+  runId: string | null
+}
+
+export interface SnapshotVerdict {
+  ok: boolean
+  reason?: string
+}
+
+/**
+ * 判断一份服务端快照能不能覆盖页面。四道闸门依次是：
+ * 代次、线程、run、逻辑版本。任何一道不过都不写，避免迟到的旧响应把新状态盖回去。
+ * threadId / runId 为 null 时跳过对应校验：页面还没认下标识，没有可保护的状态。
+ */
+export function acceptSnapshot(
+  prev: SnapshotRef | null | undefined,
+  next: SnapshotRef,
+  meta: SnapshotMeta,
+): SnapshotVerdict {
+  if (!acceptResponse(meta.seq, meta.currentSeq)) return { ok: false, reason: 'stale-seq' }
+  if (meta.threadId && String(next.thread_id || '') !== meta.threadId) {
+    return { ok: false, reason: 'thread-mismatch' }
+  }
+  if (meta.runId && String(next.run_id || '') !== meta.runId) {
+    return { ok: false, reason: 'run-mismatch' }
+  }
+  const incoming = Number(next.revision ?? 0)
+  const current = Number(prev?.revision ?? 0)
+  if (!(incoming >= current)) return { ok: false, reason: 'stale-revision' }
+  return { ok: true }
+}
+
+/**
+ * 当前应该交给界面的 interrupt。
+ * 只有服务端明确停在待确认、并且这份 payload 属于当前中断时才返回，否则一律 null：
+ * completed / failed 之后残留的旧 interrupt 不能继续驱动页面。
+ * 两侧都缺 interrupt_id 时无法比对，按「没有可校验的标识」放行，避免整块审核面板消失。
+ */
+export function nextInterrupt(snap: SnapshotRef | null | undefined): Record<string, unknown> | null {
+  if (!snap || snap.status !== 'awaiting_review') return null
+  const payload = snap.interrupt_payload
+  if (!payload || typeof payload !== 'object') return null
+  const expected = String(snap.interrupt_id || '')
+  const got = String((payload as Record<string, unknown>).interrupt_id || '')
+  if (expected && got && expected !== got) return null
+  return payload
+}
+
 export function shouldFollowPlanning(status: string | undefined): boolean {
   return status === 'planning'
 }
@@ -52,7 +121,12 @@ export type ViewPhase =
   | 'done'
   | 'failed'
 
-/** 页面只认服务端状态和当前 interrupt，不根据本地猜测推进阶段。 */
+/**
+ * 页面只认服务端状态和当前 interrupt，不根据本地猜测推进阶段。
+ * 顺序是有意的：先恢复态，再看中断，然后看是否在跑，最后才是终态。
+ * 中断类型只在服务端确实停在 awaiting_review 时才算数——completed / failed
+ * 之后残留的旧 interrupt（比如上个页面没清掉的 review）不允许把界面推回审核态。
+ */
 export function viewPhase(input: {
   restoring: boolean
   interruptType?: string
@@ -60,9 +134,11 @@ export function viewPhase(input: {
   status?: string
 }): ViewPhase {
   if (input.restoring) return 'restore'
-  if (input.interruptType === 'clarify') return 'clarify'
-  if (input.interruptType === 'assign_owners') return 'assign'
-  if (input.interruptType === 'review') return 'review'
+  if (input.status === 'awaiting_review') {
+    if (input.interruptType === 'clarify') return 'clarify'
+    if (input.interruptType === 'assign_owners') return 'assign'
+    if (input.interruptType === 'review') return 'review'
+  }
   if (input.loading || input.status === 'planning') return 'running'
   if (input.status === 'completed') return 'done'
   if (input.status === 'failed') return 'failed'
@@ -72,7 +148,7 @@ export function viewPhase(input: {
 
 export type IssueSlot = 'title' | 'owner' | 'secondary' | 'deadline' | 'acceptance' | 'evidence' | 'general'
 
-export function issueField(field?: string): IssueSlot {
+export function issueField(field?: string | null): IssueSlot {
   if (field === 'title') return 'title'
   if (field === 'primary_owner') return 'owner'
   if (field === 'secondary_owners') return 'secondary'
@@ -171,7 +247,7 @@ export function cycleIndex(index: number, count: number, backward: boolean): num
 /** 待确认的任务排在前面，其余保持原顺序。 */
 export function reviewOrder<T extends { id?: unknown }>(
   items: T[],
-  issues: Array<{ item_id?: string; severity: string }>,
+  issues: Array<{ item_id?: string | null; severity: string }>,
   primaryOf: (item: T) => string,
 ): T[] {
   const rank = (item: T) => {

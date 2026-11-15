@@ -1,6 +1,11 @@
 """环境配置。CI / Compose 默认 LLM_PROVIDER=none，保证无 Key 也能演示和评测。"""
 
+from typing import Literal
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+CHECKPOINT_MODES = ("sqlite", "memory")
 
 
 class Settings(BaseSettings):
@@ -17,8 +22,22 @@ class Settings(BaseSettings):
     llm_max_concurrency: int = 3
     llm_max_calls_per_run: int = 128  # 一次 /chat/stream 或 /resume，不含人工停留
     cors_origins: str = "http://localhost:5173"
+    app_env: str = "development"  # development / test / production
+    checkpoint_mode: Literal["sqlite", "memory"] = "sqlite"  # sqlite（持久化）| memory（仅测试/演示）
+
+    @field_validator("checkpoint_mode")
+    @classmethod
+    def _check_checkpoint_mode(cls, value: str) -> str:
+        """拒绝拼写错误的 CHECKPOINT_MODE，避免被当成 sqlite 静默运行。"""
+        if value not in CHECKPOINT_MODES:
+            raise ValueError(
+                f"CHECKPOINT_MODE 必须是 {' 或 '.join(CHECKPOINT_MODES)}，收到 {value!r}；"
+                "不会静默回退到 sqlite"
+            )
+        return value
     database_path: str = "./specops.db"
     checkpoint_path: str = "./specops_checkpoints.db"
+    request_retention_days: int = 7  # processed_requests 快照保留窗口
     max_tool_rounds: int = 4  # validate_repair 工具循环上限
     max_consecutive_tool_failures: int = 2
     max_tool_stall: int = 2  # error 数不下降则停，防止空转

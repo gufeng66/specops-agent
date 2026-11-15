@@ -8,6 +8,7 @@ from __future__ import annotations
 from app.domain.models import (
     ActionItem,
     EvidenceKind,
+    ExtractionInfo,
     IssueSeverity,
     MeetingBrief,
     OwnerCandidate,
@@ -35,10 +36,33 @@ UNREPAIRABLE_CODES = OWNER_ERROR_CODES | frozenset(
     }
 )
 
+# 可以随普通 approve 放行的 ERROR。空清单是合法终态：人工把任务删光后
+# 仍应能导出「本次无任务」，所以它虽然记 ERROR，但不属于「必须修复」。
+APPROVABLE_ERROR_CODES = frozenset({"EMPTY_TASK_LIST"})
+
 
 def has_owner_errors(validation: ValidationResult) -> bool:
     """是否存在需要人工分配的负责人类 ERROR。"""
     return any(i.code in OWNER_ERROR_CODES for i in validation.error_issues)
+
+
+def blocking_codes(validation: ValidationResult) -> list[str]:
+    """需要逐条修复或显式放行才能导出的 ERROR 码（去重保序）。
+
+    白名单豁免而非黑名单列举：新增的 ERROR 码默认阻断，不会被静默放过。
+    """
+    seen: list[str] = []
+    for issue in validation.error_issues:
+        if issue.code in OWNER_ERROR_CODES or issue.code in APPROVABLE_ERROR_CODES:
+            continue
+        if issue.code not in seen:
+            seen.append(issue.code)
+    return seen
+
+
+def has_non_owner_errors(validation: ValidationResult) -> bool:
+    """是否存在不能随普通批准放行的 ERROR。负责人错误与空清单不算。"""
+    return bool(blocking_codes(validation))
 
 
 def quote_in_source(quote: str, source_text: str) -> bool:
@@ -291,3 +315,47 @@ def apply_repairs(
     if not changed:
         return draft
     return TaskDraft(items=list(items_by_id.values()), version=draft.version + 1)
+
+
+def with_extraction_issues(
+    validation: ValidationResult,
+    extraction: ExtractionInfo | None,
+) -> ValidationResult:
+    """把抽取覆盖情况重新挂到校验结果上。
+
+    抽取告警不能只在 decompose 后 append 一次：批准、单项修订、负责人分配、
+    validate_repair 和全文重跑都会重新调用校验，直接 append 会丢。这里按
+    `ThreadSnapshot.extraction` 派生并去重，所有重算入口都走它。
+    """
+    if extraction is None or not (extraction.partial or extraction.degraded):
+        return validation
+
+    codes = {issue.code for issue in validation.issues}
+    added: list[ValidationIssue] = []
+    if extraction.degraded and "RULE_FALLBACK_ONLY" not in codes:
+        added.append(
+            ValidationIssue(
+                code="RULE_FALLBACK_ONLY",
+                message=(
+                    "模型抽取全部失败，当前只有规则结果；"
+                    f"（成功 {extraction.chunks_ok} 块，失败 {extraction.chunks_failed} 块）"
+                ),
+                severity=IssueSeverity.ADVISORY,
+            )
+        )
+    if extraction.partial and "PARTIAL_EXTRACTION" not in codes:
+        added.append(
+            ValidationIssue(
+                code="PARTIAL_EXTRACTION",
+                message=(
+                    "部分分块抽取失败，结果可能不完整，请人工确认；"
+                    f"（成功 {extraction.chunks_ok} 块，失败 {extraction.chunks_failed} 块）"
+                ),
+                severity=IssueSeverity.ADVISORY,
+            )
+        )
+    if not added:
+        return validation
+    merged = validation.model_copy(deep=True)
+    merged.issues = [*merged.issues, *added]
+    return merged

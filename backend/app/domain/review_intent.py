@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from app.domain.models import TaskDraft
 
 DROP_TRIGGERS = ("不是任务", "删掉", "删除", "去掉")
+OVERRIDE_REASON_MAX_LENGTH = 500
+OPERATOR_CLAIM_MAX_LENGTH = 200
 _ORDINAL_RE = re.compile(r"(?<!的)第\s*([0-9一二两三四五六七八九十百零〇两、，,\s]+)\s*条")
 _CN_DIGIT = {
     "零": 0,
@@ -33,6 +35,23 @@ class DropParseResult:
     matched: bool = False
     item_ids: list[str] = field(default_factory=list)
     error: str | None = None
+
+
+def normalize_override_inputs(
+    override_reason: str | None,
+    operator_claim: str | None,
+) -> tuple[str | None, str]:
+    """API 与 workflow 共用的放行输入规范化。"""
+    reason = None if override_reason is None else str(override_reason).strip()
+    claim = str(operator_claim or "").strip()
+    if reason is not None:
+        if not reason:
+            raise ValueError("override_reason must not be blank")
+        if len(reason) > OVERRIDE_REASON_MAX_LENGTH:
+            raise ValueError(f"override_reason must be at most {OVERRIDE_REASON_MAX_LENGTH} characters")
+    if len(claim) > OPERATOR_CLAIM_MAX_LENGTH:
+        raise ValueError(f"operator_claim must be at most {OPERATOR_CLAIM_MAX_LENGTH} characters")
+    return reason, claim
 
 
 def looks_like_drop_feedback(feedback: str) -> bool:

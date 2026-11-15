@@ -36,6 +36,8 @@ async def resume_run(run_id: str, body: ResumeRequest):
         "interrupt_id": body.interrupt_id,
         "interrupt_type": body.interrupt_type or "",
         "item_patch": patch,
+        "override_reason": body.override_reason,
+        "operator_claim": body.operator_claim,
     }
     known = await memory_store.get_processed(body.request_id)
     if known:
@@ -85,6 +87,8 @@ async def resume_run(run_id: str, body: ResumeRequest):
                 interrupt_id=body.interrupt_id,
                 interrupt_type=body.interrupt_type,
                 item_patch=patch,
+                override_reason=body.override_reason,
+                operator_claim=body.operator_claim,
             )
         ),
         media_type="text/event-stream",

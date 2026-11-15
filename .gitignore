@@ -102,6 +102,8 @@ $RECYCLE.BIN/
 .tmp_r2/
 tmp_*/
 scratch/
+# pytest tmp_path 工厂的 basetemp（pytest-of-<uid> / pytest-of-<数字>），跑测试即生成
+pytest-of-*/
 
 # Playwright / Vitest 运行时产物
 frontend/playwright/.cache/

@@ -20,6 +20,8 @@ from app.agent.nodes import (
     propose_owners_node,
     review_node,
     route_after_assign,
+    route_after_clarify,
+    route_after_finalize,
     route_after_intake,
     route_after_propose,
     route_after_review,
@@ -42,6 +44,7 @@ WORKFLOW_NODES = [
 WORKFLOW_EDGES = [
     ("intake", "clarify"),
     ("intake", "decompose"),
+    ("clarify", "clarify"),
     ("clarify", "decompose"),
     ("decompose", "validate_repair"),
     ("validate_repair", "propose_owners"),
@@ -54,6 +57,7 @@ WORKFLOW_EDGES = [
     ("review", "intake"),
     ("review", "validate_repair"),
     ("review", "review"),
+    ("finalize", "review"),
 ]
 
 
@@ -71,7 +75,11 @@ def build_graph(checkpointer: Any | None = None):
 
     builder.add_edge(START, "intake")
     builder.add_conditional_edges("intake", route_after_intake, ["clarify", "decompose"])
-    builder.add_edge("clarify", "decompose")
+    builder.add_conditional_edges(
+        "clarify",
+        route_after_clarify,
+        ["clarify", "decompose"],
+    )
     builder.add_edge("decompose", "validate_repair")
     builder.add_conditional_edges(
         "validate_repair",
@@ -93,7 +101,11 @@ def build_graph(checkpointer: Any | None = None):
         route_after_review,
         ["finalize", "intake", "validate_repair", "review"],
     )
-    builder.add_edge("finalize", END)
+    builder.add_conditional_edges(
+        "finalize",
+        route_after_finalize,
+        ["review", END],
+    )
 
     return builder.compile(checkpointer=checkpointer or MemorySaver())
 

@@ -4,7 +4,6 @@ import pytest
 
 from app.agent.graph import build_graph
 from app.agent.workflow import SpecOpsWorkflow
-from app.llm.client import llm_client
 from app.memory.store import MemoryStore
 
 TEXT = """会议目标：发布准备
@@ -15,7 +14,7 @@ TEXT = """会议目标：发布准备
 
 @pytest.mark.asyncio
 async def test_sqlite_checkpoint_resume_after_reopen(tmp_path, monkeypatch):
-    monkeypatch.setattr(llm_client, "provider", "none")
+    monkeypatch.setattr("app.llm.client.settings.llm_provider", "none")
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     db = str(tmp_path / "cp.db")

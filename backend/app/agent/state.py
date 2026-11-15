@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Annotated, Any, TypedDict
 
 from app.domain.models import (
+    ExtractionInfo,
     MeetingBrief,
     ReviewInfo,
     TaskDraft,
@@ -37,6 +38,9 @@ class AgentState(TypedDict, total=False):
     interrupt_id: str
     interrupt_payload: dict | None
     clarify_response: str | None
+    clarify_retry: bool
+    clarify_notice: str
+    extraction: dict
     review_action: dict | None
     assign_action: dict | None
     repair_attempts: int
@@ -65,6 +69,9 @@ def snapshot_to_state(snapshot: ThreadSnapshot, **overrides: Any) -> AgentState:
         "interrupt_id": snapshot.interrupt_id,
         "interrupt_payload": snapshot.interrupt_payload,
         "clarify_response": None,
+        "clarify_retry": False,
+        "clarify_notice": "",
+        "extraction": snapshot.extraction.model_dump(mode="json"),
         "review_action": None,
         "assign_action": None,
         "repair_attempts": snapshot.validation.repair_attempts,
@@ -101,6 +108,8 @@ def state_to_snapshot(state: AgentState, base: ThreadSnapshot | None = None) -> 
     snap.interrupt_id = state.get("interrupt_id") or ""
     if "interrupt_payload" in state:
         snap.interrupt_payload = state.get("interrupt_payload")
+    if state.get("extraction") is not None:
+        snap.extraction = ExtractionInfo.model_validate(state["extraction"])
     snap.graph_ns = state.get("graph_ns") or snap.graph_ns
     snap.prompt_version = state.get("prompt_version") or snap.prompt_version
     if state.get("review") is not None:

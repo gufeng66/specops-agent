@@ -115,7 +115,7 @@ def test_rule_extract_brief_topic_header():
     md = render_markdown(brief, draft, validate_task_draft(draft, brief, text), text)
     zhou_block = md.split("## 周婷")[1].split("## ")[0]
     assert launch.title in zhou_block
-    body = md.split("<details>")[0]
+    body = md.split("## 原文（原样，未转义）")[0]
     assert "已完成并通过确认" not in body
     people_md = body[body.find("\n## ") :]
     expected: dict[str, int] = {}
@@ -485,7 +485,7 @@ async def test_idempotency(tmp_path):
     assert first.snapshot is not None
     saved = first.snapshot.model_copy(deep=True)
     saved.status = ThreadStatus.AWAITING_REVIEW
-    assert await store.finish_request("req-idem", saved, request_status="succeeded")
+    assert (await store.finish_request("req-idem", saved, request_status="succeeded")).applied
 
     again = await store.claim_operation(
         request_id="req-idem", op="start", thread_id="t-idem", payload=payload, source_text=payload["source_text"]
@@ -503,7 +503,7 @@ async def test_thread_busy(tmp_path):
     from app.memory.store import ClaimOutcome
 
     snap.status = ThreadStatus.PLANNING
-    await store.save_thread(snap)
+    await store.save_thread(snap, expected_revision=snap.revision)
 
     result = await store.claim_operation(
         request_id="new-req",
@@ -828,10 +828,17 @@ def test_snapshot_export_strips_owner_suggestions():
         thread_id="t-export",
         meeting_brief=MeetingBrief(goal="跟进"),
         task_draft=TaskDraft(items=[item]),
+        interrupt_payload={
+            "type": "review",
+            "items": [{"id": item.id, "owner_suggestions": [{"name": "周婷"}]}],
+        },
     )
+    before = snap.model_dump(mode="json")
     dumped = snap.export_dict()
     assert "owner_suggestions" not in dumped["task_draft"]["items"][0]
+    assert "owner_suggestions" not in str(dumped)
     assert snap.task_draft.items[0].owner_suggestions
+    assert snap.model_dump(mode="json") == before
 
 
 @pytest.mark.asyncio
@@ -1483,6 +1490,9 @@ async def test_review_drop_idempotent_replay(tmp_path):
             "interrupt_id": snap.interrupt_id,
             "interrupt_type": str((snap.interrupt_payload or {}).get("type") or ""),
             "item_patch": None,
+            # 放行相关字段也进 digest，重放时必须按同一份 payload 构造。
+            "override_reason": None,
+            "operator_claim": "",
         },
         interrupt_id=snap.interrupt_id,
         interrupt_type=str((snap.interrupt_payload or {}).get("type") or ""),

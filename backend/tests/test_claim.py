@@ -69,7 +69,7 @@ async def test_interrupt_mismatch_and_clarify(tmp_path):
         interrupt_payload={"type": "clarify", "interrupt_id": "int-1"},
         source_text="原文",
     )
-    await store.save_thread(snap)
+    await store.save_thread(snap, expected_revision=0)
     bad = await store.claim_operation(
         request_id="c1",
         op="clarify",
@@ -115,7 +115,8 @@ async def test_finish_does_not_overwrite_lost_lease(tmp_path):
     stolen.status = ThreadStatus.COMPLETED
     stolen.markdown_output = "不该写上"
     wrote = await store.finish_request("owner", stolen, request_status="succeeded")
-    assert wrote is False
+    assert wrote.applied is False
+    assert wrote.code == "LEASE_LOST"
     current = await store.get_thread("t")
     assert current is not None
     assert current.markdown_output != "不该写上"

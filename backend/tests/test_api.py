@@ -69,7 +69,7 @@ async def test_thread_busy_409(api_client):
     client, store = api_client
     snap = await store.ensure_thread("busy-thread")
     snap.status = ThreadStatus.AWAITING_REVIEW
-    await store.save_thread(snap)
+    await store.save_thread(snap, expected_revision=snap.revision)
 
     resp = await client.post(
         "/api/v1/chat/stream",

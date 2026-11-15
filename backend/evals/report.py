@@ -87,13 +87,15 @@ async def _judge(pairs: list) -> int:
 
 
 async def _one(case: dict, mode: str, tmp: Path) -> dict:
-    saved = llm_client.provider
+    # enabled 由 settings.llm_provider 动态计算（LLMClient.provider 是只读 property），
+    # 因此切 rules 模式要临时改 settings，而不是给 llm_client.provider 赋值。
+    saved_provider = settings.llm_provider
     if mode == "rules":
-        llm_client.provider = "none"
+        settings.llm_provider = "none"
     try:
         result = await run_case(case, tmp, mode=mode)
     finally:
-        llm_client.provider = saved
+        settings.llm_provider = saved_provider
     row = score_case(
         case,
         result["snapshot"],
@@ -120,6 +122,8 @@ async def _one(case: dict, mode: str, tmp: Path) -> dict:
         (item.primary_owner or "") == "张三" for item in items
     )
     snap = result["snapshot"]
+    calls = int(snap.llm_calls)
+    failures = int(snap.llm_failures)
     return {
         "id": case["id"],
         "mode": mode,
@@ -130,10 +134,17 @@ async def _one(case: dict, mode: str, tmp: Path) -> dict:
         "judge_ran": judge_ran,
         "judge_hits": judge_hits,
         "judge_error": judge_error,
+        # token / 延迟 / 成本只统计拿到成功响应的调用：失败请求不产生 token，成本为 0。
         "token_in": snap.token_in,
         "token_out": snap.token_out,
         "latency_ms": snap.latency_ms,
         "cost_usd": _cost(snap.token_in, snap.token_out),
+        # 本次执行段的调用预算占用，含传输重试和 schema 重试。
+        "llm_calls": calls,
+        "transport_retries": int(snap.transport_retries),
+        "schema_retries": int(snap.schema_retries),
+        "llm_failures": failures,
+        "failure_rate": (failures / calls) if calls else 0.0,
         "injection_obeyed": obeyed,
         "error": "",
     }
@@ -152,6 +163,16 @@ def _num(value, digits: int = 3) -> str:
     return f"{value:.{digits}f}"
 
 
+def _metric_cells(rows: list[dict]) -> str:
+    """报告里的模型调用观测列。用 .get 兼容不带这些键的历史 row。"""
+    calls = sum(int(r.get("llm_calls", 0) or 0) for r in rows)
+    transport = sum(int(r.get("transport_retries", 0) or 0) for r in rows)
+    schema = sum(int(r.get("schema_retries", 0) or 0) for r in rows)
+    failures = sum(int(r.get("llm_failures", 0) or 0) for r in rows)
+    rate = failures / calls if calls else 0.0
+    return f" {calls} | {transport} | {schema} | {failures} | {rate:.3f} |"
+
+
 def _render(rows: list[dict], provenance: dict) -> str:
     lines = [
         "# Hard 集评测报告",
@@ -162,6 +183,8 @@ def _render(rows: list[dict], provenance: dict) -> str:
         f"- 来源：{provenance['source']}",
         f"- 单价（估算）：输入 ${USD_PER_M_IN}/M，输出 ${USD_PER_M_OUT}/M",
         "",
+        "调用数含传输重试与 schema 重试；失败数为失败的 HTTP 尝试数；失败率 = 失败数 / 调用数。",
+        "token / 延迟 / 成本只统计取得成功响应的调用，失败请求不产生 token，其成本按 0 计。",
         "CI 回放仍用冻结的 cassette 和 hard_expected.json。本文件是一次真 API 运行的记录，不改那些下限。",
         "",
     ]
@@ -171,18 +194,20 @@ def _render(rows: list[dict], provenance: dict) -> str:
         lines.append("")
     sem_head = " 语义召回 |" if judged else ""
     sem_rule = " --- |" if judged else ""
+    metric_head = " 调用数 | 传输重试 | schema 重试 | 失败数 | 失败率 |"
+    metric_rule = " --- | --- | --- | --- | --- |"
     lines += [
         "## 消融",
         "",
-        f"| 模式 | 召回 | 精确率 | 幻觉率 |{sem_head} token_in | token_out | 延迟 ms | 成本 USD |",
-        f"| --- | --- | --- | --- |{sem_rule} --- | --- | --- | --- |",
+        f"| 模式 | 召回 | 精确率 | 幻觉率 |{sem_head} token_in | token_out | 延迟 ms | 成本 USD |{metric_head}",
+        f"| --- | --- | --- | --- |{sem_rule} --- | --- | --- | --- |{metric_rule}",
     ]
     labels = {"rules": "rules", "llm": "hybrid", "llm_only": "llm_only"}
     for mode in MODES:
         group = [row for row in rows if row["mode"] == mode and not row["error"]]
         sem = f" {_mean(group, 'semantic_recall'):.3f} |" if judged else ""
         lines.append(
-            "| {label} | {recall:.3f} | {precision:.3f} | {hall:.3f} |{sem} {tin} | {tout} | {lat} | {cost:.6f} |".format(
+            "| {label} | {recall:.3f} | {precision:.3f} | {hall:.3f} |{sem} {tin} | {tout} | {lat} | {cost:.6f} |{metrics}".format(
                 label=labels[mode],
                 recall=_mean(group, "recall"),
                 precision=_mean(group, "precision"),
@@ -192,14 +217,15 @@ def _render(rows: list[dict], provenance: dict) -> str:
                 tout=sum(r["token_out"] for r in group),
                 lat=sum(r["latency_ms"] for r in group),
                 cost=sum(r["cost_usd"] for r in group),
+                metrics=_metric_cells(group),
             )
         )
     lines += [
         "",
         "## 逐案",
         "",
-        f"| case | 模式 | 召回 | 精确率 | 幻觉率 |{sem_head} token_in | token_out | 延迟 ms | 成本 USD | 备注 |",
-        f"| --- | --- | --- | --- | --- |{sem_rule} --- | --- | --- | --- | --- |",
+        f"| case | 模式 | 召回 | 精确率 | 幻觉率 |{sem_head} token_in | token_out | 延迟 ms | 成本 USD | 备注 |{metric_head}",
+        f"| --- | --- | --- | --- | --- |{sem_rule} --- | --- | --- | --- | --- | --- |{metric_rule}",
     ]
     for row in rows:
         note = row["error"]
@@ -209,7 +235,7 @@ def _render(rows: list[dict], provenance: dict) -> str:
             note = (note + "；" if note else "") + f"judge: {row['judge_error']}"
         sem = f" {_num(row.get('semantic_recall'))} |" if judged else ""
         lines.append(
-            "| {id} | {mode} | {recall:.3f} | {precision:.3f} | {hall:.3f} |{sem} {tin} | {tout} | {lat} | {cost:.6f} | {note} |".format(
+            "| {id} | {mode} | {recall:.3f} | {precision:.3f} | {hall:.3f} |{sem} {tin} | {tout} | {lat} | {cost:.6f} | {note} |{metrics}".format(
                 id=row["id"],
                 mode=row["mode"],
                 recall=row["recall"],
@@ -221,6 +247,7 @@ def _render(rows: list[dict], provenance: dict) -> str:
                 lat=row["latency_ms"],
                 cost=row["cost_usd"],
                 note=note.replace("|", "/"),
+                metrics=_metric_cells([row]),
             )
         )
     lines.append("")
@@ -254,6 +281,11 @@ async def main() -> None:
                             "token_out": 0,
                             "latency_ms": 0,
                             "cost_usd": 0.0,
+                            "llm_calls": 0,
+                            "transport_retries": 0,
+                            "schema_retries": 0,
+                            "llm_failures": 0,
+                            "failure_rate": 0.0,
                             "injection_obeyed": False,
                             "error": str(exc),
                         }

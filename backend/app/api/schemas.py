@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import settings
-from app.domain.review_intent import looks_like_drop_feedback
+from app.domain.review_intent import looks_like_drop_feedback, normalize_override_inputs
 
 
 class ChatStreamRequest(BaseModel):
@@ -23,6 +23,8 @@ class ChatStreamRequest(BaseModel):
         limit = settings.source_hard_limit_chars
         if len(self.source_text) > limit:
             raise ValueError(f"source_text exceeds {limit} characters")
+        if self.clarify_response is not None and not self.clarify_response.strip():
+            raise ValueError("clarify_response must not be blank")
         if self.clarify_response and not self.interrupt_id:
             raise ValueError("interrupt_id is required when clarifying")
         return self
@@ -58,11 +60,22 @@ class ResumeRequest(BaseModel):
     interrupt_id: str = ""
     drop_item_ids: list[str] = Field(default_factory=list)
     item_patch: ItemPatch | None = None
+    # 非负责人错误（证据、标题、验收标准…）不能用普通 approve 放行；
+    # 必须显式给出理由。None = 未提供，"" = 提供了空值（拒绝）。
+    override_reason: str | None = None
+    # 自述的操作者标识，不是认证身份，仅用于审计记录。
+    operator_claim: str = ""
 
     @model_validator(mode="after")
     def check_item_scope(self) -> ResumeRequest:
         if not self.interrupt_id:
             raise ValueError("interrupt_id is required")
+        self.override_reason, self.operator_claim = normalize_override_inputs(
+            self.override_reason, self.operator_claim
+        )
+        if self.override_reason is not None:
+            if not self.approve:
+                raise ValueError("override_reason requires approve=true")
         if self.item_patch is not None and (
             self.approve or self.assignments or self.drop_item_ids or self.revision_scope != "item"
         ):

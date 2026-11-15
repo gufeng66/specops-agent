@@ -30,7 +30,13 @@ from app.domain.chunking import sample_for_brief
 from app.domain.models import ActionItemList, MeetingBriefExtract, OwnerSuggestionBatch
 from app.llm.errors import LLMAPIError, LLMConfigError, LLMError, LLMParseError, LLMTimeoutError
 from app.llm.runtime import http_slot, shared_client
-from app.obs import add_llm_usage, reserve_llm_call
+from app.obs import (
+    add_llm_usage,
+    count_failure,
+    count_schema_retry,
+    count_transport_retry,
+    reserve_llm_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +45,32 @@ T = TypeVar("T", bound=BaseModel)
 
 class LLMClient:
     def __init__(self):
-        self.provider = settings.llm_provider.lower()
+        # 不缓存 provider：settings 会被测试和运行时改，缓存会读到旧值。
+        pass
+
+    @property
+    def provider(self) -> str:
+        return (settings.llm_provider or "").lower()
 
     @property
     def enabled(self) -> bool:
         return self.provider not in ("none", "") and bool(settings.deepseek_api_key)
+
+    def validate_llm_config(self) -> str:
+        """启动/readiness 阶段校验。返回空串表示可用（或明确关闭）。"""
+        provider = self.provider
+        if provider in ("none", ""):
+            return ""
+        if provider != "deepseek":
+            return f"Unsupported LLM_PROVIDER={provider}"
+        if not settings.deepseek_api_key:
+            return "DEEPSEEK_API_KEY is empty"
+        if not (settings.deepseek_model or "").strip():
+            return "DEEPSEEK_MODEL is empty"
+        base = (settings.deepseek_base_url or "").strip()
+        if not base.startswith(("http://", "https://")):
+            return f"DEEPSEEK_BASE_URL is not an http(s) URL: {base}"
+        return ""
 
     def _completions_url(self) -> str:
         return f"{settings.deepseek_base_url.rstrip('/')}/chat/completions"
@@ -81,11 +108,14 @@ class LLMClient:
                 async with http_slot():
                     data = await self._post_once(payload, node)
             except LLMTimeoutError:
+                count_failure()  # 超时的这次 HTTP 尝试失败，且不再重试
                 raise
             except LLMAPIError as exc:
+                count_failure()  # 每个失败的 HTTP 尝试各计一次（含重试中间与最终失败）
                 last_error = exc
                 if not _retryable_status(exc.status_code) or attempt == attempts - 1:
                     raise
+                count_transport_retry()
                 slept += await self._backoff(attempt, slept)
                 continue
             usage = data.get("usage") or {}
@@ -246,6 +276,7 @@ class LLMClient:
                 ),
             }
         )
+        count_schema_retry()
         data = await self.post_completions(_json_payload(messages), node)
         parsed, _content, kind, detail = _parse_json_choice(data, model_cls)
         if kind == "json":

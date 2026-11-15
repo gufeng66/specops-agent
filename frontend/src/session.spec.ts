@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { acceptResponse, confirmHeadline, confirmLabels, confirmOwner, confirmRank, cycleIndex, fieldChanges, isSettledStatus, issueField, moveTabIndex, needsSnapshotRefresh, overlayReviewItem, ownerOriginals, rememberedThread, rememberThread, resolveDraft, reviewOrder, shouldFollowPlanning, THREAD_STORAGE_KEY, viewPhase } from './session'
+import { acceptResponse, acceptSnapshot, confirmHeadline, confirmLabels, confirmOwner, confirmRank, cycleIndex, fieldChanges, isSettledStatus, issueField, moveTabIndex, needsSnapshotRefresh, nextInterrupt, overlayReviewItem, ownerOriginals, rememberedThread, rememberThread, resolveDraft, reviewOrder, shouldFollowPlanning, THREAD_STORAGE_KEY, viewPhase } from './session'
 
 describe('session recovery', () => {
   beforeEach(() => sessionStorage.clear())
@@ -45,11 +45,24 @@ describe('session recovery', () => {
   it('follows the server status and the current interrupt', () => {
     expect(viewPhase({ restoring: true, loading: false })).toBe('restore')
     expect(viewPhase({ restoring: false, loading: true, status: 'completed' })).toBe('running')
-    expect(viewPhase({ restoring: false, loading: false, interruptType: 'assign_owners' })).toBe('assign')
-    expect(viewPhase({ restoring: false, loading: false, interruptType: 'review', status: 'completed' })).toBe('review')
+    expect(viewPhase({ restoring: false, loading: false, interruptType: 'assign_owners', status: 'awaiting_review' })).toBe('assign')
+    expect(viewPhase({ restoring: false, loading: false, interruptType: 'review', status: 'awaiting_review' })).toBe('review')
     expect(viewPhase({ restoring: false, loading: false, status: 'awaiting_review' })).toBe('restore')
     expect(viewPhase({ restoring: false, loading: false, status: 'failed' })).toBe('failed')
     expect(viewPhase({ restoring: false, loading: false })).toBe('intake')
+  })
+
+  it('lets a finished run win over a stale interrupt type', () => {
+    // 新一轮跑到 completed/failed 时，上个页面可能还留着 review/assign 的 interrupt。
+    // 这些残留不能把界面推回审核或分配态。
+    expect(viewPhase({ restoring: false, loading: false, interruptType: 'review', status: 'completed' })).toBe('done')
+    expect(viewPhase({ restoring: false, loading: false, interruptType: 'assign_owners', status: 'completed' })).toBe('done')
+    expect(viewPhase({ restoring: false, loading: false, interruptType: 'clarify', status: 'failed' })).toBe('failed')
+    expect(viewPhase({ restoring: false, loading: false, interruptType: 'review', status: 'failed' })).toBe('failed')
+    // 中断类型只在 awaiting_review 时优先于 loading。
+    expect(viewPhase({ restoring: false, loading: true, interruptType: 'review', status: 'awaiting_review' })).toBe('review')
+    expect(viewPhase({ restoring: false, loading: false, interruptType: 'review', status: 'planning' })).toBe('running')
+    expect(viewPhase({ restoring: true, interruptType: 'review', loading: false, status: 'completed' })).toBe('restore')
   })
 
   it('puts tasks that need confirmation first and keeps the rest in order', () => {
@@ -130,5 +143,55 @@ describe('session recovery', () => {
     expect(moveTabIndex(0, 3, 'Enter')).toBeNull()
     expect(cycleIndex(2, 3, false)).toBe(0)
     expect(cycleIndex(0, 3, true)).toBe(2)
+  })
+
+  it('takes a snapshot only from the current run and thread', () => {
+    const meta = { seq: 3, currentSeq: 3, threadId: 'thread-1', runId: 'run-1' }
+    const prev = { thread_id: 'thread-1', run_id: 'run-1', revision: 5 }
+    const next = { thread_id: 'thread-1', run_id: 'run-1', revision: 6, status: 'awaiting_review' }
+    expect(acceptSnapshot(prev, next, meta)).toEqual({ ok: true })
+
+    // 代次过期：用户已经开了新的一次执行，迟到的旧响应必须丢掉。
+    expect(acceptSnapshot(prev, next, { ...meta, currentSeq: 4 }).reason).toBe('stale-seq')
+    // 线程变了：不能把另一条会话的快照画到当前页面。
+    expect(acceptSnapshot(prev, { ...next, thread_id: 'thread-2' }, meta).reason).toBe('thread-mismatch')
+    // run 变了：同一线程的另一次执行不能覆盖当前这次。
+    expect(acceptSnapshot(prev, { ...next, run_id: 'run-2' }, meta).reason).toBe('run-mismatch')
+    // revision 回退：旧快照晚到不能把新状态盖回去。
+    expect(acceptSnapshot(prev, { ...next, revision: 4 }, meta).reason).toBe('stale-revision')
+    // 相同 revision 可以重放（幂等回放不推进版本）。
+    expect(acceptSnapshot(prev, { ...next, revision: 5 }, meta)).toEqual({ ok: true })
+    // 首次加载没有 prev，且旧数据没有 revision 时按 0 处理。
+    expect(acceptSnapshot(null, { ...next, revision: 0 }, meta)).toEqual({ ok: true })
+    expect(acceptSnapshot(undefined, { ...next, revision: undefined }, meta)).toEqual({ ok: true })
+  })
+
+  it('has no snapshot guard before the page knows the thread and run', () => {
+    const meta = { seq: 1, currentSeq: 1, threadId: null, runId: null }
+    expect(acceptSnapshot(null, { thread_id: 'thread-9', run_id: 'run-9', revision: 0 }, meta)).toEqual({ ok: true })
+  })
+
+  it('hands over an interrupt only while the server is waiting for review', () => {
+    const payload = { type: 'review', interrupt_id: 'int-1' }
+    expect(nextInterrupt({
+      status: 'awaiting_review',
+      interrupt_id: 'int-1',
+      interrupt_payload: payload,
+    })).toEqual(payload)
+
+    // 已完成 / 失败 / 在跑：旧 interrupt 不能继续驱动页面。
+    expect(nextInterrupt({ status: 'completed', interrupt_id: 'int-1', interrupt_payload: payload })).toBeNull()
+    expect(nextInterrupt({ status: 'failed', interrupt_id: 'int-1', interrupt_payload: payload })).toBeNull()
+    expect(nextInterrupt({ status: 'planning', interrupt_id: 'int-1', interrupt_payload: payload })).toBeNull()
+    // 没有 payload。
+    expect(nextInterrupt({ status: 'awaiting_review', interrupt_id: 'int-1' })).toBeNull()
+    expect(nextInterrupt({ status: 'awaiting_review', interrupt_payload: null })).toBeNull()
+    // 中断标识对不上：页面拿的是上一次的 payload。
+    expect(nextInterrupt({
+      status: 'awaiting_review',
+      interrupt_id: 'int-2',
+      interrupt_payload: payload,
+    })).toBeNull()
+    expect(nextInterrupt(null)).toBeNull()
   })
 })

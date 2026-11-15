@@ -1,8 +1,12 @@
 <script setup lang="ts">
 /**
  * 会议原文。编辑和定位分两套视图，避免高亮层和输入框错位。
+ *
+ * 放大和窄屏抽屉都是「模态」：会盖住页面、要锁滚动、要限制焦点。
+ * 两者都必须 Teleport 到 body 之后再给 #app 设 inert——留在 #app 里
+ * 会被自己的 inert 波及，抽屉里的按钮就点不动了。
  */
-import { nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { cycleIndex } from './session'
 
 const text = defineModel<string>('text', { required: true })
@@ -27,6 +31,15 @@ const emit = defineEmits<{
 const sourceRead = ref<HTMLElement | null>(null)
 const pane = ref<HTMLElement | null>(null)
 const expandBtn = ref<HTMLButtonElement | null>(null)
+
+/** 放大或抽屉任一成立，就是模态。 */
+const isModal = computed(() => props.expanded || props.drawer)
+
+/** 是否是用户主动放大（抽屉由 App 的 sourceOpen 控制关闭）。 */
+function closeModal() {
+  if (props.expanded) emit('update:expanded', false)
+  else if (props.drawer) emit('close')
+}
 
 function focusables(root: HTMLElement) {
   return [...root.querySelectorAll<HTMLElement>('button, textarea, [tabindex="0"]')].filter((el) => {
@@ -61,7 +74,15 @@ function scrollToMark() {
 }
 
 function trapFocus(event: KeyboardEvent) {
-  if (!props.expanded || event.key !== 'Tab' || !pane.value) return
+  if (!isModal.value) return
+  if (event.key === 'Escape') {
+    // 关掉模态并阻止冒泡，避免 App 的全局 Esc 再处理一次。
+    event.preventDefault()
+    event.stopPropagation()
+    closeModal()
+    return
+  }
+  if (event.key !== 'Tab' || !pane.value) return
   const items = focusables(pane.value)
   if (!items.length) return
   const index = items.indexOf(document.activeElement as HTMLElement)
@@ -76,16 +97,41 @@ function trapFocus(event: KeyboardEvent) {
   items[cycleIndex(index, items.length, event.shiftKey)].focus()
 }
 
+/**
+ * 背景 inert。只对 #app 生效，而模态面板本身已经 Teleport 到 body，
+ * 不在 #app 的子树里，所以不会被自己锁住。Teleport 关闭（非模态）时
+ * 面板还在 #app 内，这时绝不能设 inert，否则整页都点不动。
+ */
 function setBackgroundInert(on: boolean) {
+  // 面板 Teleport 到 body 后不在 #app 子树里，不会被本次设置波及；
+  // 非模态时面板仍在 #app 内，此时绝不能设 inert。
   const app = document.getElementById('app')
   if (app) app.inert = on
 }
 
-watch(() => props.expanded, async (on) => {
-  setBackgroundInert(on)
+/**
+ * 记住这次模态是被「放大」还是被「抽屉」打开的：放大按钮就在面板里，
+ * 关闭时要自己把焦点收回去；抽屉是 App 打开的，焦点交给 App 归还触发按钮，
+ * 否则用户会被丢到面板里的按钮上。
+ */
+let modalFromExpand = false
+
+watch(isModal, async (on, was) => {
+  if (on) {
+    modalFromExpand = props.expanded
+    // 打开时先等这一帧：Teleport 要把面板搬到 body，之后设 inert 才不会锁住自己。
+    await nextTick()
+    setBackgroundInert(true)
+    if (pane.value) focusables(pane.value)[0]?.focus()
+    return
+  }
+  if (!was) return
+  // 关闭时立刻解锁：App 会在同一帧稍后把焦点还给触发按钮，
+  // #app 还 inert 的话 focus() 会被静默忽略，焦点就永远回不到按钮上。
+  setBackgroundInert(false)
+  // 等这一帧是因为 Teleport 会把面板从 body 搬回 #app，搬动带焦点的节点会丢焦点。
   await nextTick()
-  if (on && pane.value) focusables(pane.value)[0]?.focus()
-  else expandBtn.value?.focus()
+  if (modalFromExpand) expandBtn.value?.focus()
 })
 
 // 放大、抽屉切换都会改变容器尺寸，之前算好的滚动位置就失效了，要重新居中。
@@ -102,14 +148,14 @@ defineExpose({ scrollToMark })
 </script>
 
 <template>
-  <Teleport to="body" :disabled="!expanded">
+  <Teleport to="body" :disabled="!isModal">
     <div
       ref="pane"
       class="source-pane"
-      :class="{ expanded, 'is-open': open }"
-      :role="expanded ? 'dialog' : undefined"
-      :aria-modal="expanded ? true : undefined"
-      :aria-label="expanded ? '会议原文' : undefined"
+      :class="{ expanded, 'is-open': open, drawer }"
+      :role="isModal ? 'dialog' : undefined"
+      :aria-modal="isModal ? true : undefined"
+      :aria-label="isModal ? '会议原文' : undefined"
       @keydown="trapFocus"
     >
       <div v-if="drawer" class="drawer-bar">
@@ -181,4 +227,13 @@ defineExpose({ scrollToMark })
 }
 .expanded textarea,
 .expanded .source-read { flex: 1 1 auto; min-height: 0; max-height: none; }
+/* 抽屉同样固定在视口里，Teleport 到 body 后不再受 #app 布局影响。 */
+.drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--bg);
+  padding: 1rem;
+  overflow: auto;
+}
 </style>

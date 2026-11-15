@@ -41,12 +41,16 @@ function snap() {
   return {
     thread_id: 'thread-1',
     run_id: 'run-1',
-    status: 'awaiting_assign',
+    // 后端三种人工中断（澄清 / 分配 / 审核）的状态都是 awaiting_review，靠 interrupt.type 区分。
+    status: 'awaiting_review',
+    revision: 1,
     source_text: SOURCE,
     meeting_brief: { goal: '目标', stakeholders: ['张伟', '李娜'], meeting_date: '' },
     task_draft: { items: [] },
     validation: { issues: [] },
     markdown_output: '',
+    interrupt_id: 'int-assign',
+    interrupt_payload: assignPayload(),
   }
 }
 
