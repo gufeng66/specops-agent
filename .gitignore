@@ -49,6 +49,7 @@ coverage.xml
 *.db-shm
 *.sqlite
 *.sqlite3
+*.sqlite-*
 specops.db
 specops_checkpoints.db
 

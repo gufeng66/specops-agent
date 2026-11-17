@@ -15,6 +15,7 @@ import SourcePane from './SourcePane.vue'
 import TaskBoard, { type BoardItem } from './TaskBoard.vue'
 import { streamSSE, uuid } from './sse'
 import { acceptResponse, acceptSnapshot, confirmHeadline, confirmLabels, confirmOwner, fieldChanges, isSettledStatus, issueField, moveTabIndex, needsSnapshotRefresh, nextInterrupt, overlayReviewItem, ownerOriginals, rememberedThread, rememberThread, resolveDraft, reviewOrder, shouldFollowPlanning, viewPhase, type IssueSlot } from './session'
+import { findQuoteRange, isHitlInteractiveTarget } from './sourceLocation'
 
 interface ActionItem extends BoardItem {
   description: string
@@ -230,7 +231,12 @@ const showSource = computed(() => {
   if (phase.value === 'done') return sourceOpen.value
   return true
 })
-const layoutClass = computed(() => (phase.value === 'assign' || phase.value === 'review') ? 'layout-split' : 'layout-stack')
+const layoutClass = computed(() => {
+  const split = phase.value === 'assign'
+    || phase.value === 'review'
+    || (phase.value === 'done' && sourceOpen.value)
+  return split ? 'layout-split' : 'layout-stack'
+})
 const sortedReviewItems = computed(() =>
   reviewOrder(reviewItems.value, snapshot.value?.validation?.issues ?? [], (item) => effectivePrimary(item)),
 )
@@ -1061,25 +1067,6 @@ function onResultTabKey(event: KeyboardEvent) {
   void nextTick(() => document.getElementById(`result-tab-${resultView.value}`)?.focus())
 }
 
-function quoteCandidates(item: BoardItem): string[] {
-  // 定位原文：先 evidence_quote，再 description / title；推断任务往往没有连续引用
-  const extra = (item as ActionItem).description
-  const out: string[] = []
-  for (const raw of [item.evidence_quote, extra, item.title]) {
-    const text = (raw || '').trim()
-    if (text && !out.includes(text)) out.push(text)
-  }
-  return out
-}
-
-function findQuoteRange(haystack: string, item: BoardItem): { start: number; end: number } | null {
-  for (const quote of quoteCandidates(item)) {
-    const start = haystack.indexOf(quote)
-    if (start >= 0) return { start, end: start + quote.length }
-  }
-  return null
-}
-
 const quoteParts = computed(() => {
   const range = quoteRange.value
   if (!range) return null
@@ -1131,13 +1118,6 @@ function selectItemForRevise(item: BoardItem) {
   void nextTick(() => {
     document.getElementById(`task-${item.id}`)?.scrollIntoView({ block: 'start' })
   })
-}
-
-function isHitlInteractiveTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false
-  return Boolean(
-    target.closest('select, option, button, input, textarea, label, .assign-controls'),
-  )
 }
 
 function focusHitlItem(raw: Record<string, unknown>) {
@@ -1627,7 +1607,14 @@ resetPipeline()
         <div class="actions">
           <button type="button" class="btn-primary" @click="download('md')">下载 Markdown</button>
           <button type="button" class="btn-ghost" @click="download('json')">下载 JSON</button>
-          <button type="button" class="btn-ghost" @click="sourceOpen = !sourceOpen">{{ sourceOpen ? '收起原文' : '查看原文' }}</button>
+          <button
+            id="done-source-toggle"
+            type="button"
+            class="btn-ghost"
+            aria-controls="source-pane"
+            :aria-expanded="sourceOpen"
+            @click="sourceOpen = !sourceOpen"
+          >{{ sourceOpen ? '收起原文' : '查看原文' }}</button>
         </div>
         <div class="tabs" role="tablist" aria-label="结果视图" @keydown="onResultTabKey">
           <button

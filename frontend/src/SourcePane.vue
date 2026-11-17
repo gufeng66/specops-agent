@@ -151,6 +151,7 @@ defineExpose({ scrollToMark })
   <Teleport to="body" :disabled="!isModal">
     <div
       ref="pane"
+      id="source-pane"
       class="source-pane"
       :class="{ expanded, 'is-open': open, drawer }"
       :role="isModal ? 'dialog' : undefined"
