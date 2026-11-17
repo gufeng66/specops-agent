@@ -39,7 +39,8 @@ async function expectNoOverlap(page: Page) {
 test('长原文定位后只滚动正文内部，不覆盖字数和工具栏', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await openAssign(page)
-  expect(await page.locator('.char-count').innerText()).toContain('2908 字')
+  const sourceLength = (await page.locator('textarea').inputValue()).length
+  await expect(page.locator('.char-count')).toContainText(`${sourceLength} 字`)
 
   const pageScrollBefore = await page.evaluate(() => scrollY)
   await page.locator('.hitl-assign .locate-link').first().click()
