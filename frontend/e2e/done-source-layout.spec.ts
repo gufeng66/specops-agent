@@ -23,7 +23,7 @@ async function openDone(page: Page) {
 test('完成页桌面打开原文时显示在结果右侧', async ({ page }) => {
   await openDone(page)
 
-  const toggle = page.getByRole('button', { name: '查看原文' })
+  const toggle = page.locator('#done-source-toggle')
   await expect(page.locator('.source-pane')).toBeHidden()
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 
