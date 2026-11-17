@@ -14,7 +14,8 @@ import ProgressLog from './ProgressLog.vue'
 import SourcePane from './SourcePane.vue'
 import TaskBoard, { type BoardItem } from './TaskBoard.vue'
 import { streamSSE, uuid } from './sse'
-import { acceptResponse, confirmHeadline, confirmLabels, confirmOwner, fieldChanges, isSettledStatus, issueField, moveTabIndex, needsSnapshotRefresh, overlayReviewItem, ownerOriginals, rememberedThread, rememberThread, resolveDraft, reviewOrder, shouldFollowPlanning, viewPhase, type IssueSlot } from './session'
+import { acceptResponse, acceptSnapshot, confirmHeadline, confirmLabels, confirmOwner, fieldChanges, isSettledStatus, issueField, moveTabIndex, needsSnapshotRefresh, nextInterrupt, overlayReviewItem, ownerOriginals, rememberedThread, rememberThread, resolveDraft, reviewOrder, shouldFollowPlanning, viewPhase, type IssueSlot } from './session'
+import { findQuoteRange, isHitlInteractiveTarget } from './sourceLocation'
 
 interface ActionItem extends BoardItem {
   description: string
@@ -34,14 +35,45 @@ interface OwnerCandidate {
   inference_reason: string
 }
 
+interface ProblemIssue {
+  code: string
+  message: string
+  severity: string
+  item_id?: string | null
+  field?: string | null
+}
+
+interface Extraction {
+  chunks_total?: number
+  chunks_ok?: number
+  chunks_empty?: number
+  chunks_failed?: number
+  partial?: boolean
+  degraded?: boolean
+  detail?: string
+}
+
 interface Snapshot {
   thread_id: string
   run_id: string
   status: string
+  /** 逻辑版本：只接受不倒退的版本，旧响应不能覆盖新状态。 */
+  revision?: number
+  schema_version?: number
+  checkpoint_id?: string
   source_text: string
   meeting_brief: { goal: string; stakeholders: string[]; meeting_date: string }
   task_draft: { items: ActionItem[] }
-  validation: { issues: Array<{ code: string; message: string; severity: string; item_id?: string; field?: string }> }
+  validation: { issues: ProblemIssue[] }
+  extraction?: Extraction | null
+  review?: {
+    override_reason?: string | null
+    override_codes?: string[]
+    override_at?: string | null
+    operator_claim?: string | null
+  } | null
+  interrupt_id?: string | null
+  interrupt_payload?: Record<string, unknown> | null
   markdown_output: string
   idempotent?: boolean
 }
@@ -142,6 +174,14 @@ const fieldDrafts = reactive<Record<string, {
 const unsavedNotice = ref<string[]>([])
 const unsavedBack = ref<HTMLButtonElement | null>(null)
 const ownerConfirmed = reactive<Record<string, boolean>>({})
+/** 放行理由：仅当本轮存在阻断错误时才需要，且只随 approve 提交。 */
+const overrideReason = ref('')
+const operatorClaim = ref('')
+const showOverride = ref(false)
+/** 刷新失败时的可重试入口：既有快照不清空，只提示并可再次查询。 */
+const needRetry = ref(false)
+/** App 已经认下的 run_id；跨 run 的旧响应一律拒收。 */
+let expectedRunId: string | null = null
 const loading = ref(false)
 const errorMsg = ref('')
 const notice = ref('')
@@ -159,6 +199,9 @@ const resultTabs = ['list', 'people', 'markdown'] as const
 let narrowQuery: MediaQueryList | null = null
 let runSeq = 0
 let abortCtrl: AbortController | null = null
+/** 轮询代次：同一时刻只允许一个 poller，旧 poller 每轮自查后自行退出。 */
+let pollerSeq = 0
+const POLL_DELAYS = [500, 1000, 2000, 4000]
 const SOFT_LIMIT = 8000
 const HARD_LIMIT = 100000
 
@@ -188,7 +231,12 @@ const showSource = computed(() => {
   if (phase.value === 'done') return sourceOpen.value
   return true
 })
-const layoutClass = computed(() => (phase.value === 'assign' || phase.value === 'review') ? 'layout-split' : 'layout-stack')
+const layoutClass = computed(() => {
+  const split = phase.value === 'assign'
+    || phase.value === 'review'
+    || (phase.value === 'done' && sourceOpen.value)
+  return split ? 'layout-split' : 'layout-stack'
+})
 const sortedReviewItems = computed(() =>
   reviewOrder(reviewItems.value, snapshot.value?.validation?.issues ?? [], (item) => effectivePrimary(item)),
 )
@@ -219,6 +267,40 @@ const markdownHtml = computed(() => {
   return DOMPurify.sanitize(html)
 })
 const assignItems = computed(() => (interrupt.value?.items as Array<Record<string, unknown>>) ?? [])
+
+/** 阻断错误：非空时「一键批准」必须先写放行理由。 */
+const blockingErrors = computed<ProblemIssue[]>(() => {
+  const raw = interrupt.value?.blocking_errors
+  if (!Array.isArray(raw)) return []
+  return (raw as ProblemIssue[]).filter((row) => row && typeof row === 'object')
+})
+
+const needOverride = computed(() => {
+  const advertised = interrupt.value?.override_required
+  return typeof advertised === 'boolean' ? advertised : blockingErrors.value.length > 0
+})
+
+/** interrupt 上的抽取情况优先，没有时退回快照。 */
+const extraction = computed<Extraction | null>(() => {
+  const fromInterrupt = interrupt.value?.extraction
+  if (fromInterrupt && typeof fromInterrupt === 'object') return fromInterrupt as Extraction
+  return snapshot.value?.extraction ?? null
+})
+
+const extractionPartial = computed(() => Boolean(extraction.value?.partial || extraction.value?.degraded))
+
+const extractionWarning = computed(() => {
+  if (!extractionPartial.value) return ''
+  const failed = Number(extraction.value?.chunks_failed ?? 0)
+  if (failed > 0) {
+    return `本次有 ${failed} 个分块抽取失败，结果可能不完整，请人工确认。`
+  }
+  // 没有失败但降级：通常是模型不可用，只走了确定性规则。
+  if (extraction.value?.degraded) return '本次仅规则结果，抽取能力受限，请人工确认。'
+  return '本次抽取不完整，结果可能不完整，请人工确认。'
+})
+
+const extractionDetail = computed(() => String(extraction.value?.detail || '').trim())
 const reviewItems = computed(() => {
   const rows = (interrupt.value?.items as Array<Record<string, unknown>>) ?? []
   const byId = new Map(taskItems.value.map((item) => [item.id, item]))
@@ -370,13 +452,15 @@ function seedAssignDrafts(payload: Record<string, unknown>) {
 async function loadSample(path: string) {
   try {
     const resp = await fetch(path)
+    // fetch 对 404 也 resolve，必须显式判 ok，否则会把错误页正文当原文。
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     sourceText.value = await resp.text()
   } catch {
     errorMsg.value = '无法加载示例文件，请手动粘贴'
   }
 }
 
-function makeHandlers(mine: () => boolean) {
+function makeHandlers(mine: () => boolean, seq: number) {
   // 每个入口自己的闭包。旧流迟到回调看到代次不对就丢掉，避免关掉新一次的 loading。
   return {
     onMetadata: (d: Record<string, unknown>) => {
@@ -385,6 +469,8 @@ function makeHandlers(mine: () => boolean) {
         threadId.value = d.thread_id as string
         rememberThread(threadId.value)
       }
+      // 新一轮开始后旧 run_id 作废，等结果里带上新 run_id 再认下来。
+      if (d.run_id) expectedRunId = String(d.run_id)
     },
     onProgress: (d: { node: string; message: string; status?: string }) => {
       if (!mine()) return
@@ -396,18 +482,26 @@ function makeHandlers(mine: () => boolean) {
     },
     onInterrupt: (d: Record<string, unknown>) => {
       if (!mine()) return
-      interrupt.value = d
+      // 中断同样要过快照门禁：旧流迟到的 interrupt 不能把完成态改回审核态。
+      if (!acceptInterrupt(d, seq)) return
       const t = String(d.type || '')
       if (PIPELINE_IDS.includes(t)) nodeStatus[t] = 'waiting'
-      if (t === 'assign_owners' || t === 'review') seedAssignDrafts(d)
     },
     onResult: (d: Record<string, unknown>) => {
       if (!mine()) return
-      snapshot.value = d as unknown as Snapshot
+      applySnapshot(d, seq)
     },
-    onError: (d: { message: string }) => {
+    onError: (d: { message: string; code?: string }) => {
       if (!mine()) return
       errorMsg.value = d.message
+      if (d.code === 'SNAPSHOT_CONFLICT' || d.code === 'LEASE_LOST') {
+        // 这条流没有权威结果：废掉旧轮询与 run 门禁，只接收重新读取的服务端快照。
+        pollerSeq += 1
+        expectedRunId = null
+        interrupt.value = null
+        loading.value = false
+        void refreshThread(seq)
+      }
     },
     onDone: () => {
       if (!mine()) return
@@ -416,22 +510,116 @@ function makeHandlers(mine: () => boolean) {
   }
 }
 
+/**
+ * 中断帧也要过快照门禁。
+ * interrupt 事件不带完整快照，但它会决定页面显示「分配/审核」面板，所以不能绕过
+ * acceptSnapshot 直接写 interrupt.value。这里用当前快照补齐缺失标识后再判一次，
+ * 并按状态与中断标识排掉旧帧：完成/失败页面上迟到的 interrupt 一律丢弃。
+ *
+ * 后端会在 interrupt payload 里补 thread_id / run_id / revision，但旧缓存和
+ * 回放流可能没有这些字段，所以缺字段时不强依赖，只按「当前是否仍在等待人工操作」判断。
+ */
+function acceptInterrupt(data: Record<string, unknown>, seq: number): boolean {
+  const type = String(data.type || '')
+  // 只认三种人工中断；其余类型不会改页面的等待状态。
+  if (!HITL_NODES.has(type)) return false
+
+  const current = snapshot.value
+  const thread = String(data.thread_id ?? current?.thread_id ?? threadId.value ?? '')
+  if (threadId.value && thread && thread !== threadId.value) return false
+  const run = String(data.run_id ?? current?.run_id ?? expectedRunId ?? '')
+  if (expectedRunId && run && run !== expectedRunId) return false
+
+  const incomingRevision = Number(data.revision ?? Number.NaN)
+  const currentRevision = Number(current?.revision ?? Number.NaN)
+  if (Number.isFinite(incomingRevision) && Number.isFinite(currentRevision) && incomingRevision < currentRevision) {
+    return false
+  }
+
+  // 只有服务端真的停在待审核时，中断才代表「现在要人操作」。完成/失败/运行中的页面上
+  // 收到的 interrupt 都是旧流迟到的帧，不能把审核面板重新拉起来。
+  // 真流程里 interrupt 帧会紧跟一条 result，由 applySnapshot 统一落状态；这里丢掉不影响。
+  if (current?.status && current.status !== 'awaiting_review') return false
+
+  const incomingId = String(data.interrupt_id ?? '')
+  const probe = {
+    thread_id: thread || null,
+    run_id: run || null,
+    status: 'awaiting_review',
+    revision: Number.isFinite(incomingRevision)
+      ? incomingRevision
+      : (Number.isFinite(currentRevision) ? currentRevision : 0),
+    interrupt_id: incomingId,
+    interrupt_payload: data,
+  }
+  const verdict = acceptSnapshot(current, probe, {
+    seq,
+    currentSeq: runSeq,
+    threadId: threadId.value,
+    runId: expectedRunId,
+  })
+  if (!verdict.ok) return false
+  if (!nextInterrupt(probe)) return false
+
+  // 快照仍停在另一个中断上：只有能证明这一帧更新（revision 更大）才替换，
+  // 否则等随后的 result 帧统一收口，避免旧流把审核面板换成过期内容。
+  const currentId = String(current?.interrupt_id ?? '')
+  if (current && current.status === 'awaiting_review' && currentId && incomingId && currentId !== incomingId) {
+    const newer = Number.isFinite(incomingRevision) && Number.isFinite(currentRevision)
+      && incomingRevision > currentRevision
+    if (!newer) return false
+  }
+
+  interrupt.value = data
+  return true
+}
+
+/**
+ * 服务端快照统一入口：SSE 的 result 和刷新线程都走这里。
+ * 先过 acceptSnapshot，拒绝旧 seq / 别的 run / 倒退的 revision，
+ * 迟到的旧响应才不会把页面改回上一次的状态。
+ */
+function applySnapshot(data: Record<string, unknown>, seq: number): boolean {
+  const next = data as unknown as Snapshot
+  const verdict = acceptSnapshot(snapshot.value, next, {
+    seq,
+    currentSeq: runSeq,
+    threadId: threadId.value,
+    runId: expectedRunId,
+  })
+  if (!verdict.ok) return false
+  snapshot.value = next
+  expectedRunId = String(next.run_id || '') || null
+  needRetry.value = false
+  // 只有服务端真的停在待审核时才有中断可操作，其余状态一律清空。
+  const pending = nextInterrupt(next)
+  interrupt.value = pending
+  if (pending) seedAssignDrafts(pending)
+  if (next.source_text && !sourceText.value) sourceText.value = next.source_text
+  return true
+}
+
 function beginRun() {
-  const outcome = { result: false }
+  const outcome = { result: false, conflict: false }
   const { mine, signal } = startControlledRun()
   const seq = runSeq
-  const handlers = makeHandlers(mine)
+  const handlers = makeHandlers(mine, seq)
   const markResult = handlers.onResult
   handlers.onResult = (data) => {
     outcome.result = true
     markResult?.(data)
   }
+  const markError = handlers.onError
+  handlers.onError = (data) => {
+    if (data.code === 'SNAPSHOT_CONFLICT' || data.code === 'LEASE_LOST') outcome.conflict = true
+    markError?.(data)
+  }
   return { mine, signal, seq, handlers, outcome }
 }
 
-async function settleRun(mine: () => boolean, seq: number, outcome: { result: boolean }) {
+async function settleRun(mine: () => boolean, seq: number, outcome: { result: boolean; conflict: boolean }) {
   if (mine()) loading.value = false
-  if (!mine() || !needsSnapshotRefresh(outcome.result)) return
+  if (!mine() || outcome.conflict || !needsSnapshotRefresh(outcome.result)) return
   await refreshThread(seq)
   if (mine() && shouldFollowPlanning(snapshot.value?.status)) void pollThread(seq)
 }
@@ -453,32 +641,85 @@ function cancelRun() {
   void pollThread(seq)
 }
 
-async function refreshThread(seq: number) {
-  const id = threadId.value
-  if (!id || !acceptResponse(seq, runSeq)) return
-  const resp = await fetch(`/api/v1/threads/${id}`)
-  if (!resp.ok || !acceptResponse(seq, runSeq)) return
-  const data = await resp.json()
-  if (!acceptResponse(seq, runSeq)) return
-  snapshot.value = data
-  if (data.status === 'awaiting_review' && data.interrupt_payload) {
-    interrupt.value = data.interrupt_payload
-    seedAssignDrafts(data.interrupt_payload)
-  }
-  if (data.source_text && !sourceText.value) sourceText.value = data.source_text
+/**
+ * 提交或刷新失败时，用保留下来的快照还原中断。
+ * 中断在发起提交时被清空过，不还原的话审核面板会整块消失，用户连重试入口都看不到。
+ */
+function keepInterrupt() {
+  interrupt.value = nextInterrupt(snapshot.value)
 }
 
-async function pollThread(seq: number) {
-  for (let i = 0; i < 8; i += 1) {
-    if (!acceptResponse(seq, runSeq)) return
-    await refreshThread(seq)
-    if (isSettledStatus(snapshot.value?.status)) {
-      notice.value = ''
-      return
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000))
+/**
+ * 刷新线程。失败绝不清空既有快照：先保留上次结果，再给可重试入口。
+ * 返回 true 表示拿到了被接受的新快照。
+ */
+async function refreshThread(seq: number): Promise<boolean> {
+  const id = threadId.value
+  if (!id || !acceptResponse(seq, runSeq)) return false
+  let resp: Response
+  try {
+    resp = await fetch(`/api/v1/threads/${id}`)
+  } catch (err) {
+    // 主动取消不算故障，别用错误提示打扰用户。
+    if (err instanceof DOMException && err.name === 'AbortError') return false
+    if (!acceptResponse(seq, runSeq)) return false
+    notice.value = '网络异常，已保留上次结果'
+    needRetry.value = true
+    keepInterrupt()
+    return false
   }
-  if (acceptResponse(seq, runSeq)) notice.value = '服务端仍在处理'
+  if (!acceptResponse(seq, runSeq)) return false
+  if (!resp.ok) {
+    notice.value = '已保留上次结果'
+    errorMsg.value = `HTTP ${resp.status}`
+    needRetry.value = true
+    keepInterrupt()
+    return false
+  }
+  let data: Record<string, unknown>
+  try {
+    data = await resp.json()
+  } catch {
+    if (!acceptResponse(seq, runSeq)) return false
+    notice.value = '已保留上次结果'
+    errorMsg.value = '响应格式异常'
+    needRetry.value = true
+    keepInterrupt()
+    return false
+  }
+  if (!acceptResponse(seq, runSeq)) return false
+  return applySnapshot(data, seq)
+}
+
+/** 单例守卫：连续点「再次查询」只保留最后一个 poller。 */
+async function pollThread(seq: number) {
+  const mine = ++pollerSeq
+  try {
+    for (let i = 0; i < 8; i += 1) {
+      if (mine !== pollerSeq || !acceptResponse(seq, runSeq)) return
+      await refreshThread(seq)
+      if (mine !== pollerSeq || !acceptResponse(seq, runSeq)) return
+      if (isSettledStatus(snapshot.value?.status)) {
+        notice.value = ''
+        needRetry.value = false
+        return
+      }
+      const delay = POLL_DELAYS[Math.min(i, POLL_DELAYS.length - 1)]
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+    if (mine === pollerSeq && acceptResponse(seq, runSeq)) notice.value = '服务端仍在处理'
+  } finally {
+    if (mine === pollerSeq) pollerSeq = 0
+  }
+}
+
+/** 「再次查询」：先废掉在跑的 poller，再起新的一个。 */
+function requery() {
+  // 自增一次即让在跑的 poller 在下一轮自查时退出，新 poller 会拿到更大的代次。
+  pollerSeq += 1
+  needRetry.value = false
+  errorMsg.value = ''
+  void pollThread(runSeq)
 }
 
 onMounted(async () => {
@@ -566,6 +807,13 @@ async function resume(approve = false) {
     }))
     if (type === 'assign_owners') body.approve = false
   }
+  if (approve) {
+    // 放行理由只随批准提交；分配/修订走自己的语义，不带 override 字段。
+    const reason = overrideReason.value.trim()
+    const claim = operatorClaim.value.trim()
+    if (reason) body.override_reason = reason
+    if (claim) body.operator_claim = claim
+  }
 
   try {
     await streamSSE(`/api/v1/runs/${snapshot.value.run_id}/resume`, body, handlers, signal)
@@ -573,6 +821,12 @@ async function resume(approve = false) {
     if (mine()) errorMsg.value = err instanceof Error ? err.message : '请求失败'
   } finally {
     await settleRun(mine, seq, outcome)
+    // 提交成功的放行理由不再复用，避免下一次批准带上次的旧理由。
+    if (mine() && approve && !errorMsg.value) {
+      overrideReason.value = ''
+      operatorClaim.value = ''
+      showOverride.value = false
+    }
   }
 }
 
@@ -659,9 +913,25 @@ function toggleSecondary(itemId: string, name: string) {
   draft.secondary_owners = [...set].filter(n => n !== draft.primary_owner)
 }
 
-function download(format: 'md' | 'json') {
-  if (!threadId.value) return
-  window.open(`/api/v1/threads/${threadId.value}/export?format=${format}`, '_blank')
+async function download(format: 'md' | 'json') {
+  const id = threadId.value
+  if (!id) return
+  // window.open 感知不到 HTTP 失败（404/500 也会开一个白页），改成取回 Blob 再触发下载。
+  try {
+    const resp = await fetch(`/api/v1/threads/${id}/export?format=${format}`)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `specops-${id}.${format}`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    errorMsg.value = `导出失败：${err instanceof Error ? err.message : '未知错误'}`
+  }
 }
 
 function asBoardItem(raw: Record<string, unknown> | BoardItem): BoardItem {
@@ -749,7 +1019,20 @@ function unsavedLines() {
   })
 }
 
+/**
+ * 放行理由必填：存在阻断错误时，理由 trim 后为空就不提交，改为展开理由表单。
+ * 没填理由的批准按契约会被后端 422 拒绝，前端先拦住才不会白跑一趟。
+ */
+function overrideReady(): boolean {
+  if (!needOverride.value) return true
+  if (overrideReason.value.trim()) return true
+  showOverride.value = true
+  void nextTick(() => document.getElementById('override-reason')?.focus())
+  return false
+}
+
 function requestApprove() {
+  if (!overrideReady()) return
   const lines = unsavedLines()
   if (lines.length) {
     unsavedNotice.value = lines
@@ -760,6 +1043,7 @@ function requestApprove() {
 }
 
 function discardUnsavedAndApprove() {
+  if (!overrideReady()) return
   clearFieldDrafts()
   void resume(true)
 }
@@ -781,25 +1065,6 @@ function onResultTabKey(event: KeyboardEvent) {
   event.preventDefault()
   resultView.value = resultTabs[next]
   void nextTick(() => document.getElementById(`result-tab-${resultView.value}`)?.focus())
-}
-
-function quoteCandidates(item: BoardItem): string[] {
-  // 定位原文：先 evidence_quote，再 description / title；推断任务往往没有连续引用
-  const extra = (item as ActionItem).description
-  const out: string[] = []
-  for (const raw of [item.evidence_quote, extra, item.title]) {
-    const text = (raw || '').trim()
-    if (text && !out.includes(text)) out.push(text)
-  }
-  return out
-}
-
-function findQuoteRange(haystack: string, item: BoardItem): { start: number; end: number } | null {
-  for (const quote of quoteCandidates(item)) {
-    const start = haystack.indexOf(quote)
-    if (start >= 0) return { start, end: start + quote.length }
-  }
-  return null
 }
 
 const quoteParts = computed(() => {
@@ -855,13 +1120,6 @@ function selectItemForRevise(item: BoardItem) {
   })
 }
 
-function isHitlInteractiveTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false
-  return Boolean(
-    target.closest('select, option, button, input, textarea, label, .assign-controls'),
-  )
-}
-
 function focusHitlItem(raw: Record<string, unknown>) {
   // 分配面板里的定位入口：选中该项并把原文面板打开，窄屏下面板是抽屉，
   // 不打开就只标了 <mark> 而用户看不到，所以这里和文案承诺保持一致。
@@ -887,19 +1145,45 @@ function onNarrow(event: MediaQueryListEvent) {
   narrow.value = event.matches
 }
 
-watch([expand, sourceOpen, narrow], () => {
-  document.body.style.overflow = expand.value || (sourceOpen.value && narrow.value) ? 'hidden' : ''
+/** 只有在等人工操作的阶段，窄屏抽屉才需要锁整页滚动；完成页看原文不该把页面钉住。 */
+const isHitlPhase = computed(() => ['clarify', 'assign', 'review'].includes(phase.value))
+/** 放大原文始终是模态；窄屏抽屉只在 HITL 阶段锁滚动。 */
+const lockScroll = computed(() => expand.value || (sourceOpen.value && narrow.value && isHitlPhase.value))
+
+watch(lockScroll, (on) => {
+  document.body.style.overflow = on ? 'hidden' : ''
+})
+
+watch(needOverride, (on) => {
+  // 一旦出现阻断错误就默认摊开理由表单，避免用户对着灰按钮找不到原因。
+  if (on) showOverride.value = true
 })
 
 watch(phase, (next) => {
   if (next === 'review' || next === 'assign' || next === 'done' || next === 'clarify') sourceMode.value = 'read'
   if (next === 'intake' || next === 'failed') sourceMode.value = 'edit'
+  // 离开等待/编辑阶段后抽屉不再有意义，收起来以免挡住新的主操作区。
+  if (next === 'intake' || next === 'running' || next === 'done' || next === 'failed') sourceOpen.value = false
 })
 
+/** 抽屉关闭后把焦点还给触发它的按钮；抽屉的打开按钮在 App 侧，SourcePane 拿不到。 */
+let drawerTrigger: HTMLElement | null = null
+function openDrawer() {
+  const active = document.activeElement
+  drawerTrigger = active instanceof HTMLElement ? active : null
+  sourceOpen.value = true
+}
+
 watch(sourceOpen, async (open) => {
-  if (!open) return
+  if (open) {
+    await nextTick()
+    sourcePane.value?.scrollToMark()
+    return
+  }
+  // 收起后 Teleport 结束，等 DOM 稳定再归还焦点，否则会被搬动覆盖。
   await nextTick()
-  sourcePane.value?.scrollToMark()
+  if (drawerTrigger?.isConnected) drawerTrigger.focus()
+  drawerTrigger = null
 })
 
 onUnmounted(() => {
@@ -932,7 +1216,12 @@ resetPipeline()
     <div v-if="errorMsg" class="banner" role="alert">
       <p>{{ errorMsg }}</p>
       <p>可以修改原文后重新生成，或再次查询当前进度。</p>
-      <button v-if="threadId" type="button" class="btn-ghost" @click="pollThread(runSeq)">再次查询</button>
+      <button v-if="threadId" type="button" class="btn-ghost" @click="requery">再次查询</button>
+    </div>
+
+    <div v-else-if="needRetry" class="banner" role="status">
+      <p>{{ notice || '已保留上次结果' }}</p>
+      <button v-if="threadId" type="button" class="btn-ghost" @click="requery">再次查询</button>
     </div>
 
     <section v-if="phase === 'intake'" class="lead">
@@ -978,7 +1267,7 @@ resetPipeline()
       <section v-else-if="phase === 'restore'" aria-live="polite">
         <h1>{{ restoring ? '正在恢复上次的审核' : '审核内容还没有载入' }}</h1>
         <p>{{ restoring ? '正在读取服务端保存的进度。' : '服务端仍停在待确认，但这次没有拿到待确认的内容。' }}</p>
-        <button v-if="!restoring" type="button" class="btn-ghost" @click="pollThread(runSeq)">再次查询</button>
+        <button v-if="!restoring" type="button" class="btn-ghost" @click="requery">再次查询</button>
       </section>
 
       <section v-else-if="phase === 'running'" aria-live="polite">
@@ -988,7 +1277,7 @@ resetPipeline()
         <p class="note">取消会停止这次等待。服务端会按检查点记下当前状态。</p>
         <div class="actions">
           <button v-if="loading" type="button" class="btn-ghost" @click="cancelRun">取消等待</button>
-          <button v-if="notice === '服务端仍在处理'" type="button" class="btn-ghost" @click="pollThread(runSeq)">再次查询</button>
+          <button v-if="notice === '服务端仍在处理'" type="button" class="btn-ghost" @click="requery">再次查询</button>
         </div>
       </section>
 
@@ -1008,7 +1297,7 @@ resetPipeline()
         <h1>无法从原文确认主责的任务</h1>
         <p>{{ interrupt?.message || '请为下面的任务指定负责人。点选建议不会直接保存，提交分配后才会写入。' }}</p>
         <p v-if="narrow" class="note">选中任务后，打开原文对照依据。</p>
-        <button v-if="narrow" type="button" class="btn-ghost" @click="sourceOpen = true">查看原文</button>
+        <button v-if="narrow" type="button" class="btn-ghost" @click="openDrawer">查看原文</button>
         <div
           v-for="item in assignItems"
           :key="String(item.id)"
@@ -1092,7 +1381,18 @@ resetPipeline()
         <h1>审核任务清单</h1>
         <p>{{ interrupt?.message || '核对任务后批准，或先改某一项。' }}</p>
         <p class="note">{{ confirmHeadline(confirmStats) }}序号是全部任务的顺序。选中一项后，原文会标出依据。</p>
-        <button v-if="narrow" type="button" class="btn-ghost" @click="sourceOpen = true">查看原文</button>
+        <button v-if="narrow" type="button" class="btn-ghost" @click="openDrawer">查看原文</button>
+        <div v-if="extractionWarning" class="banner banner-warn" role="status">
+          <p>{{ extractionWarning }}</p>
+          <p v-if="extractionDetail" class="note">{{ extractionDetail }}</p>
+        </div>
+        <div v-if="needOverride" class="issue-list issue-blocking" role="alert">
+          <p><strong>有 {{ blockingErrors.length }} 项必须先处理或显式放行。</strong>直接批准会被服务端拒绝。</p>
+          <div v-for="(issue, idx) in blockingErrors" :key="String(issue.code) + idx" class="issue">
+            <p><strong>{{ issueTone(issue.severity) }}。</strong>{{ issue.message }}</p>
+            <details><summary>标识</summary><span class="mono">{{ issue.code }}</span></details>
+          </div>
+        </div>
         <div v-if="looseIssues.length" class="issue-list">
           <div v-for="issue in looseIssues" :key="issue.code + issue.message" class="issue">
             <p><strong>{{ issueTone(issue.severity) }}。</strong>{{ issue.message }}</p>
@@ -1259,8 +1559,38 @@ resetPipeline()
             <button type="button" class="btn-ghost" @click="discardUnsavedAndApprove">放弃修改并批准</button>
           </div>
         </div>
+        <form v-if="needOverride" id="override-form" class="override-form" @submit.prevent="requestApprove">
+          <h2>
+            填写放行理由
+            <button type="button" class="btn-ghost btn-toggle" @click="showOverride = !showOverride">
+              {{ showOverride ? '收起' : '展开' }}
+            </button>
+          </h2>
+          <p class="note">本次存在阻断错误。批准会在审核记录里留下理由和自述人，请写清为什么可以放行。</p>
+          <div v-show="showOverride">
+            <label class="field-label" for="override-reason">放行理由（必填）</label>
+            <textarea
+              id="override-reason"
+              v-model="overrideReason"
+              rows="3"
+              placeholder="例如：已与主讲人确认，第 3 条负责人由张三线下认领。"
+            />
+            <label class="field-label" for="operator-claim">自述操作人（选填）</label>
+            <input id="operator-claim" v-model="operatorClaim" placeholder="未认证自述，仅作记录" />
+            <p class="note">当前没有登录态，这个姓名不会被验证，只写进审核记录。</p>
+          </div>
+        </form>
+
         <div class="actions approve-bar">
-          <button type="button" class="btn-primary btn-approve" :disabled="loading" @click="requestApprove">一键批准并完成</button>
+          <button
+            type="button"
+            class="btn-primary btn-approve"
+            :disabled="loading || (needOverride && !overrideReason.trim())"
+            @click="requestApprove"
+          >
+            一键批准并完成
+          </button>
+          <p v-if="needOverride" class="note">先填写放行理由，按钮才可用。</p>
         </div>
       </section>
 
@@ -1270,10 +1600,21 @@ resetPipeline()
         <p v-if="snapshot?.meeting_brief">参会人：{{ snapshot.meeting_brief.stakeholders?.join('、') || '未填写' }}</p>
         <p v-if="snapshot?.meeting_brief">日期：{{ snapshot.meeting_brief.meeting_date || '未填写' }}</p>
         <p v-if="snapshot?.idempotent" class="note">这是已保存的结果，没有重新生成。</p>
+        <div v-if="extractionWarning" class="banner banner-warn" role="status">
+          <p>{{ extractionWarning }}</p>
+          <p v-if="extractionDetail" class="note">{{ extractionDetail }}</p>
+        </div>
         <div class="actions">
           <button type="button" class="btn-primary" @click="download('md')">下载 Markdown</button>
           <button type="button" class="btn-ghost" @click="download('json')">下载 JSON</button>
-          <button type="button" class="btn-ghost" @click="sourceOpen = !sourceOpen">{{ sourceOpen ? '收起原文' : '查看原文' }}</button>
+          <button
+            id="done-source-toggle"
+            type="button"
+            class="btn-ghost"
+            aria-controls="source-pane"
+            :aria-expanded="sourceOpen"
+            @click="sourceOpen = !sourceOpen"
+          >{{ sourceOpen ? '收起原文' : '查看原文' }}</button>
         </div>
         <div class="tabs" role="tablist" aria-label="结果视图" @keydown="onResultTabKey">
           <button
@@ -1384,6 +1725,19 @@ h2 { font-size: 1.125rem; line-height: 1.4; font-weight: 650; }
   padding: 0.85rem 1rem;
 }
 .banner .btn-ghost { margin-top: 0.5rem; color: var(--ink); }
+/* 抽取不完整只是风险提示，用琥珀而不是危险色，避免和真正的失败混在一起。 */
+.banner-warn {
+  margin: 0.75rem 0;
+  background: var(--amber-bg);
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.issue-blocking { border-left: 3px solid var(--danger); padding-left: 0.7rem; }
+.issue-blocking > p { margin-bottom: 0.35rem; }
+.override-form { margin: 1rem 0; padding: 0.85rem 1rem; border: 1px solid var(--line); border-radius: var(--radius); }
+.override-form h2 { display: flex; align-items: center; gap: 0.5rem; font-size: 1.05rem; }
+.override-form .btn-toggle { margin-left: auto; }
+.override-form textarea { min-height: 5rem; }
 .assign-row { padding: 0.85rem 0; border-bottom: 1px solid var(--line); }
 .assign-row.selected, .task-card.selected { background: var(--selected); }
 .task-card { padding: 0.85rem 0.35rem; border-bottom: 1px solid var(--line); scroll-margin-top: 1rem; }

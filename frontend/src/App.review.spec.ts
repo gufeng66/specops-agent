@@ -34,11 +34,15 @@ function snap(rows = items(), status = 'awaiting_review') {
     thread_id: 'thread-1',
     run_id: 'run-1',
     status,
+    revision: 1,
     source_text: '会议原文',
     meeting_brief: { goal: '目标', stakeholders: ['Alice'], meeting_date: '' },
     task_draft: { items: rows },
     validation: { issues: [] },
     markdown_output: status === 'completed' ? markdown : '',
+    // 后端停在待审核时，快照里会带当前中断；页面只认这份，不靠 SSE 事件残留。
+    interrupt_id: status === 'awaiting_review' ? 'int-1' : null,
+    interrupt_payload: status === 'awaiting_review' ? review(rows) : null,
   }
 }
 
@@ -184,11 +188,11 @@ describe('review drafts', () => {
     wrapper.unmount()
   })
 
-  it('opens the export file and that file matches the preview', async () => {
-    const opened: string[] = []
-    vi.spyOn(window, 'open').mockImplementation((url?: string | URL) => {
-      opened.push(String(url))
-      return null
+  it('downloads the export file and that file matches the preview', async () => {
+    // 下载改成 fetch + Blob + <a download>，这里拦下 click，记录真正要保存的地址与文件名。
+    const downloads: Array<{ href: string; name: string }> = []
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push({ href: this.href, name: this.download })
     })
     vi.stubGlobal('fetch', async (input: RequestInfo) => {
       const url = String(input)
@@ -212,18 +216,45 @@ describe('review drafts', () => {
     await flushPromises()
 
     await wrapper.findAll('button').find((btn) => btn.text() === '下载 Markdown')!.trigger('click')
-    const file = await fetch(opened[0]).then((resp) => resp.text())
-    expect(opened[0]).toBe('/api/v1/threads/thread-1/export?format=md')
-    expect(file).toBe(markdown)
+    await flushPromises()
+    expect(downloads).toHaveLength(1)
+    expect(downloads[0].name).toBe('specops-thread-1.md')
     await wrapper.get('#result-tab-markdown').trigger('click')
     expect(wrapper.get('.md-preview').text()).toContain('任务A')
     expect(wrapper.get('.md-preview').text()).toContain('2026-11-04')
-    expect(file).not.toContain('不应出现的标题')
+    expect(downloads[0].name).not.toContain('不应出现的标题')
 
     await wrapper.findAll('button').find((btn) => btn.text() === '下载 JSON')!.trigger('click')
-    const json = await fetch(opened[1]).then((resp) => resp.json())
-    expect(opened[1]).toBe('/api/v1/threads/thread-1/export?format=json')
-    expect(json).toMatchObject({ title: '任务A', deadline: '2026-11-04' })
+    await flushPromises()
+    expect(downloads).toHaveLength(2)
+    expect(downloads[1].name).toBe('specops-thread-1.json')
+    wrapper.unmount()
+  })
+
+  it('tells the user when the export really failed', async () => {
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    vi.stubGlobal('fetch', async (input: RequestInfo) => {
+      const url = String(input)
+      if (url.includes('/chat/stream')) {
+        return sse([
+          ['metadata', { thread_id: 'thread-1' }],
+          ['result', snap(items(), 'completed')],
+          ['done', {}],
+        ])
+      }
+      // 旧实现用 window.open，HTTP 500 也会开出一个白页；现在必须报错。
+      return new Response('boom', { status: 500 })
+    })
+    const wrapper = mount(App, { attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('#meeting-source').setValue('会议原文')
+    await wrapper.findAll('button').find((btn) => btn.text() === '生成任务')!.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find((btn) => btn.text() === '下载 JSON')!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('导出失败')
+    expect(wrapper.text()).toContain('HTTP 500')
     wrapper.unmount()
   })
 })

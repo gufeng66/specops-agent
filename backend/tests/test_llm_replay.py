@@ -8,7 +8,6 @@ import respx
 from httpx import Response
 
 from app.agent.prompts import PROMPT_VERSION
-from app.llm.client import llm_client
 from evals.cassette import last_user_text, load_cassettes, user_hash
 from evals.runner import load_hard_cases, run_case
 from evals.score import score_case
@@ -17,7 +16,8 @@ EXPECTED_PATH = Path(__file__).resolve().parents[1] / "evals" / "hard_expected.j
 
 
 def _enable(monkeypatch):
-    monkeypatch.setattr(llm_client, "provider", "deepseek")
+    # provider 现在动态读 settings，不再缓存到实例上；patch 缓存属性会直接报错。
+    monkeypatch.setattr("app.llm.client.settings.llm_provider", "deepseek")
     monkeypatch.setattr("app.llm.client.settings.deepseek_api_key", "sk-test")
     monkeypatch.setattr("app.llm.client.settings.deepseek_base_url", "https://api.deepseek.com")
 

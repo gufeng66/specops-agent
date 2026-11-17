@@ -6,6 +6,9 @@ services:
     ports:
       - "8001:8001"
     environment:
+      APP_ENV: ${APP_ENV:-production}
+      CHECKPOINT_MODE: ${CHECKPOINT_MODE:-sqlite}
+      REQUEST_RETENTION_DAYS: ${REQUEST_RETENTION_DAYS:-7}
       LLM_PROVIDER: ${LLM_PROVIDER:-none}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
@@ -15,6 +18,20 @@ services:
       CHECKPOINT_PATH: /data/specops_checkpoints.db
     volumes:
       - backend-data:/data
+    healthcheck:
+      # /ready 覆盖业务库、SQLite checkpoint、共享 HTTP 客户端和 LLM 配置；
+      # 进程起来不等于这些依赖已经初始化完成。
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/ready').status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   frontend:
     build:
@@ -25,7 +42,8 @@ services:
     environment:
       VITE_API_PROXY: http://backend:8001
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   backend-data:

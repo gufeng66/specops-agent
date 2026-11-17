@@ -360,20 +360,31 @@ _SPANS = {
 }
 
 
-def write_golden() -> list[Path]:
-    """把 CASES 写成 golden/{id}.json。手改 JSON 后不要无脑重跑覆盖。"""
-    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+def write_golden(out_dir: Path | None = None) -> list[Path]:
+    """把 CASES 写成 golden/{id}.json。手改 JSON 后不要无脑重跑覆盖。
+
+    out_dir 供测试把生成结果注入 tmp_path，避免普通测试写仓库冻结基准。
+    默认仍是仓库内的 GOLDEN_DIR，只有显式 `--write` 命令才允许写回仓库。
+    """
+    target = out_dir if out_dir is not None else GOLDEN_DIR
+    target.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for case in CASES:
         spans = _SPANS.get(case["id"]) or []
         for item, span in zip(case["expect"]["items"], spans):
             item["evidence_spans"] = [span]
-        path = GOLDEN_DIR / f"{case['id']}.json"
+        path = target / f"{case['id']}.json"
         path.write_text(json.dumps(case, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         written.append(path)
     return written
 
 
 if __name__ == "__main__":
-    files = write_golden()
-    print(f"wrote {len(files)} cases to {GOLDEN_DIR}")
+    import sys
+
+    if "--write" in sys.argv:
+        files = write_golden()
+        print(f"wrote {len(files)} cases to {GOLDEN_DIR}")
+    else:
+        print("冻结基准不会自动重写；确需重录时执行：python -m evals.generate_cases --write")
+        print("重录前请先确认目标文件没有用户已有的修改。")

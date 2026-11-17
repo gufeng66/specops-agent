@@ -12,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
+from langgraph.graph import END
 from langgraph.types import interrupt
 
 from app.agent.prompts import TOOL_LOOP_SYSTEM
@@ -23,7 +25,7 @@ from app.agent.tools import (
     drop_items_tool,
     export_markdown_tool,
     repair_task_draft_tool,
-    validate_task_draft_tool,
+    validate_and_annotate,
 )
 from app.config import settings
 from app.domain.chunking import (
@@ -41,11 +43,19 @@ from app.domain.extractors import (
     rule_extract_brief,
     trust_edited_names,
 )
-from app.domain.models import MeetingBrief, TaskDraft, ThreadStatus, ValidationResult
+from app.domain.models import (
+    ExtractionInfo,
+    MeetingBrief,
+    ReviewInfo,
+    TaskDraft,
+    ThreadStatus,
+    ValidationResult,
+)
 from app.domain.review_intent import parse_drop_intent
 from app.domain.validation import (
     OWNER_ERROR_CODES,
     UNREPAIRABLE_CODES,
+    blocking_codes,
     has_owner_errors,
     sanitize_owner_candidates,
 )
@@ -127,7 +137,7 @@ async def intake_node(state: AgentState) -> dict[str, Any]:
                     brief.context = llm_brief.brief.context
                 used = "deepseek+rules"
 
-    clarify = state.get("clarify_response")
+    clarify = str(state.get("clarify_response") or "").strip()
     if clarify and not brief.goal:
         brief.goal = clarify
 
@@ -160,12 +170,17 @@ def route_after_intake(state: AgentState) -> Literal["clarify", "decompose"]:
 
 
 async def clarify_node(state: AgentState) -> dict[str, Any]:
-    """HITL：补会议目标。interrupt 后把用户文本写入 brief.goal。"""
-    interrupt_id = state.get("interrupt_id") or str(uuid4())
+    """HITL：补会议目标。空白澄清不写 goal，重新进入本节点并换新 interrupt_id。"""
+    # 每次进入都换新的 interrupt_id：空白澄清会自循环回本节点，
+    # 复用旧 ID 会让旧页面提交的请求命中新中断。
+    interrupt_id = str(uuid4())
+    retry = bool(state.get("clarify_retry"))
     payload = {
         "type": "clarify",
         "interrupt_id": interrupt_id,
-        "message": "缺少明确的会议目标，请补充",
+        "message": "澄清内容不能为空，请重新补充会议目标"
+        if retry
+        else "缺少明确的会议目标，请补充",
         "fields": ["goal"],
     }
     raw = interrupt(payload)
@@ -178,16 +193,38 @@ async def clarify_node(state: AgentState) -> dict[str, Any]:
     if text.strip():
         brief.goal = text.strip()
 
+    if needs_clarification(brief):
+        # 仍然没有目标：不写 goal，带回审核提示并回到 clarify，而不是进 decompose。
+        return {
+            "meeting_brief": brief.model_dump(mode="json"),
+            "interrupt_id": interrupt_id,
+            "interrupt_payload": None,
+            "clarify_retry": True,
+            "clarify_notice": "未填写会议目标，已退回澄清",
+            "status": ThreadStatus.PLANNING.value,
+            "pending_events": _events(_progress("clarify", "澄清为空，请重新补充", "running")),
+        }
+
     return {
         "meeting_brief": brief.model_dump(mode="json"),
         "interrupt_id": interrupt_id,
         "interrupt_payload": None,
+        "clarify_retry": False,
+        "clarify_notice": "",
         "status": ThreadStatus.PLANNING.value,
         "pending_events": _events(
             _progress("clarify", "已收到澄清，继续拆解", "done"),
             _progress("decompose", "分解行动项", "running"),
         ),
     }
+
+
+def route_after_clarify(state: AgentState) -> Literal["clarify", "decompose"]:
+    """目标仍为空 → 再来一次澄清；否则进拆解。"""
+    brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
+    if needs_clarification(brief):
+        return "clarify"
+    return "decompose"
 
 
 async def _llm_decompose(
@@ -259,12 +296,27 @@ async def decompose_node(state: AgentState) -> dict[str, Any]:
 
     brief = enrich_brief_from_items(brief, draft.items)
     note = f"得到 {len(draft.items)} 项 · {_route_label(used)}"
-    if stats["ok"] or stats["empty"] or stats["failed"]:
+    attempted = mode != "rules" and llm_client.enabled
+    if attempted:
         note += f" · 成功 {stats['ok']} 块，零任务 {stats['empty']} 块，失败 {stats['failed']} 块"
+    extraction = ExtractionInfo(
+        chunks_total=len(chunks),
+        chunks_ok=stats["ok"] if attempted else 0,
+        chunks_empty=stats["empty"] if attempted else 0,
+        chunks_failed=stats["failed"] if attempted else 0,
+        partial=attempted and stats["failed"] > 0 and stats["ok"] > 0,
+        degraded=attempted and stats["ok"] == 0 and stats["failed"] > 0,
+        detail=(
+            f"成功 {stats['ok']} 块，零任务 {stats['empty']} 块，失败 {stats['failed']} 块"
+            if attempted
+            else "规则路径，未调用模型"
+        ),
+    )
 
     return {
         "task_draft": draft.model_dump(mode="json"),
         "meeting_brief": brief.model_dump(mode="json"),
+        "extraction": extraction.model_dump(mode="json"),
         "eval_pre_enrich_stakeholders": pre_stakeholders,
         "pending_events": _events(
             _progress("decompose", note, "done"),
@@ -278,13 +330,14 @@ async def validate_repair_node(state: AgentState) -> dict[str, Any]:
     source = state.get("source_text") or ""
     brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
     draft = TaskDraft.model_validate(state.get("task_draft") or {"items": []})
+    extraction = ExtractionInfo.model_validate(state.get("extraction") or {})
     events: list[dict[str, Any]] = []
 
     mode = _eval_mode(state)
     if mode in {"rules", "llm", "llm_only"} or not llm_client.enabled:
-        draft, validation, events = _rule_validate_repair(draft, brief, source)
+        draft, validation, events = _rule_validate_repair(draft, brief, source, extraction)
     else:
-        draft, validation, events = await _llm_tool_validate_repair(draft, brief, source)
+        draft, validation, events = await _llm_tool_validate_repair(draft, brief, source, extraction)
 
     use_llm = llm_client.enabled and mode != "rules"
     go_propose = use_llm or has_owner_errors(validation)
@@ -309,13 +362,14 @@ def _rule_validate_repair(
     draft: TaskDraft,
     brief: MeetingBrief,
     source: str,
+    extraction: ExtractionInfo | None = None,
 ) -> tuple[TaskDraft, ValidationResult, list[dict[str, Any]]]:
     """无 Key：规则修复最多 MAX_REPAIR 轮，从不 drop 条目（假阳性留给审核删除）。"""
     events: list[dict[str, Any]] = []
     validation = ValidationResult()
     for attempt in range(MAX_REPAIR + 1):
         events.append(_progress("validate_repair", f"验证任务草案 (attempt {attempt})"))
-        validation = validate_task_draft_tool(draft, brief, source)
+        validation = validate_and_annotate(draft, brief, source, extraction)
         validation.repair_attempts = attempt
         events.append(
             _tool_result(
@@ -345,7 +399,7 @@ def _rule_validate_repair(
         )
 
     repair_attempts = validation.repair_attempts
-    validation = validate_task_draft_tool(draft, brief, source)
+    validation = validate_and_annotate(draft, brief, source, extraction)
     validation.repair_attempts = repair_attempts
     return draft, validation, events
 
@@ -379,10 +433,11 @@ def _execute_loop_tool(
     draft: TaskDraft,
     brief: MeetingBrief,
     source: str,
+    extraction: ExtractionInfo | None = None,
 ) -> tuple[TaskDraft, dict[str, Any]]:
     """执行模型点名的确定性工具。未知名字抛错，让循环记一次失败。"""
     if name == "validate_task_draft":
-        validation = validate_task_draft_tool(draft, brief, source)
+        validation = validate_and_annotate(draft, brief, source, extraction)
         payload = {
             "tool": name,
             "valid": validation.valid,
@@ -391,7 +446,7 @@ def _execute_loop_tool(
         }
         return draft, payload
     if name == "repair_task_draft":
-        validation = validate_task_draft_tool(draft, brief, source)
+        validation = validate_and_annotate(draft, brief, source, extraction)
         repairable = [i for i in validation.error_issues if i.code not in UNREPAIRABLE_CODES]
         if not repairable:
             return draft, {"tool": name, "item_count": len(draft.items), "skipped": True}
@@ -413,10 +468,11 @@ async def _llm_tool_validate_repair(
     draft: TaskDraft,
     brief: MeetingBrief,
     source: str,
+    extraction: ExtractionInfo | None = None,
 ) -> tuple[TaskDraft, ValidationResult, list[dict[str, Any]]]:
     """有 Key：模型调度 validate / repair / drop，有轮次、失败、stall 上限。"""
     events: list[dict[str, Any]] = []
-    validation = validate_task_draft_tool(draft, brief, source)
+    validation = validate_and_annotate(draft, brief, source, extraction)
     events.append(_progress("validate_repair", "LLM 工具循环开始", "running"))
     events.append(
         _tool_result(
@@ -479,7 +535,9 @@ async def _llm_tool_validate_repair(
                 arguments = {}
             call_id = str(call.get("id") or name)
             try:
-                draft, payload = _execute_loop_tool(name, arguments, draft, brief, source)
+                draft, payload = _execute_loop_tool(
+                    name, arguments, draft, brief, source, extraction
+                )
                 consecutive_failures = 0
                 executed += 1
                 events.append(_progress("validate_repair", f"调用 {name}"))
@@ -505,7 +563,7 @@ async def _llm_tool_validate_repair(
                 if consecutive_failures >= max_fail:
                     break
 
-        validation = validate_task_draft_tool(draft, brief, source)
+        validation = validate_and_annotate(draft, brief, source, extraction)
         if len(validation.error_issues) >= prev_errors:
             stall += 1
             events.append(_progress("validate_repair", f"校验无进展 stall={stall}/{max_stall}"))
@@ -526,7 +584,7 @@ async def _llm_tool_validate_repair(
             }
         )
 
-    validation = validate_task_draft_tool(draft, brief, source)
+    validation = validate_and_annotate(draft, brief, source, extraction)
     validation.repair_attempts = rounds
     events.append(
         _tool_result(
@@ -665,6 +723,7 @@ async def assign_owners_node(state: AgentState) -> dict[str, Any]:
     draft = TaskDraft.model_validate(state.get("task_draft") or {"items": []})
     source = state.get("source_text") or ""
     validation = ValidationResult.model_validate(state.get("validation") or {})
+    extraction = ExtractionInfo.model_validate(state.get("extraction") or {})
     interrupt_id = str(uuid4())
     pending_items = _owner_error_items(draft, validation)
     payload = {
@@ -682,7 +741,7 @@ async def assign_owners_node(state: AgentState) -> dict[str, Any]:
         assignments = list(raw.get("assignments") or [])
     review = dict(state.get("review") or {})
     draft, brief, review = _apply_confirmed_owners(draft, brief, assignments, review)
-    validation = validate_task_draft_tool(draft, brief, source)
+    validation = validate_and_annotate(draft, brief, source, extraction)
     attempts += 1
 
     still_bad = has_owner_errors(validation)
@@ -734,6 +793,9 @@ async def review_node(state: AgentState) -> dict[str, Any]:
     interrupt_id = str(uuid4())
     validation = ValidationResult.model_validate(state.get("validation") or {})
     draft = TaskDraft.model_validate(state.get("task_draft") or {"items": []})
+    extraction = ExtractionInfo.model_validate(state.get("extraction") or {})
+    blocking_codes_set = set(blocking_codes(validation))
+    blocking = [i for i in validation.error_issues if i.code in blocking_codes_set]
     payload = {
         "type": "review",
         "interrupt_id": interrupt_id,
@@ -757,8 +819,12 @@ async def review_node(state: AgentState) -> dict[str, Any]:
             }
             for idx, item in enumerate(draft.items, 1)
         ],
+        # 责任人类错误可以人工批准；非负责人错误必须逐条修复或显式放行。
         "unresolved_errors": [i.model_dump(mode="json") for i in validation.error_issues],
+        "blocking_errors": [i.model_dump(mode="json") for i in blocking],
+        "override_required": bool(blocking),
         "advisory_issues": [i.model_dump(mode="json") for i in validation.advisory_issues],
+        "extraction": extraction.model_dump(mode="json"),
     }
     action = interrupt(payload)
     if not isinstance(action, dict):
@@ -824,7 +890,7 @@ async def review_node(state: AgentState) -> dict[str, Any]:
         if str(target_item_id) not in review["edited_item_ids"]:
             review["edited_item_ids"].append(str(target_item_id))
         source = state.get("source_text") or ""
-        validation = validate_task_draft_tool(patched, brief, source)
+        validation = validate_and_annotate(patched, brief, source, extraction)
         return {
             "task_draft": patched.model_dump(mode="json"),
             "meeting_brief": brief.model_dump(mode="json"),
@@ -843,14 +909,52 @@ async def review_node(state: AgentState) -> dict[str, Any]:
         }
 
     if approve:
+        brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
+        source = state.get("source_text") or ""
         assignments: list[dict[str, Any]] = []
         if isinstance(action, dict):
             assignments = list(action.get("assignments") or [])
-        brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
         if assignments:
             draft, brief, review = _apply_confirmed_owners(draft, brief, assignments, review)
-            source = state.get("source_text") or ""
-            validation = validate_task_draft_tool(draft, brief, source)
+        # 无论有没有负责人改动都重算：上一次的 validation 可能已经过期。
+        validation = validate_and_annotate(draft, brief, source, extraction)
+
+        override_reason = (
+            str(action.get("override_reason") or "").strip() if isinstance(action, dict) else ""
+        )
+        operator_claim = (
+            str(action.get("operator_claim") or "").strip() if isinstance(action, dict) else ""
+        )
+        blocking = [i for i in validation.error_issues if i.code in set(blocking_codes(validation))]
+        if blocking and not override_reason:
+            # 证据、标题、验收标准这类错误不能靠普通批准放行；重新进审核，由人逐条修。
+            review["approved"] = False
+            return {
+                "task_draft": draft.model_dump(mode="json"),
+                "meeting_brief": brief.model_dump(mode="json"),
+                "validation": validation.model_dump(mode="json"),
+                "interrupt_id": interrupt_id,
+                "interrupt_payload": None,
+                "review_action": {"route": "review"},
+                "review": review,
+                "status": ThreadStatus.PLANNING.value,
+                **cleared,
+                "pending_events": _events(
+                    _progress("review", "存在必须修复的问题，未完成导出", "done"),
+                    _progress("review", "请先修改或填写放行理由", "running"),
+                ),
+            }
+        if blocking:
+            review["override_reason"] = override_reason
+            review["override_codes"] = blocking_codes(validation)
+            review["override_at"] = datetime.now(timezone.utc).isoformat()
+            review["operator_claim"] = operator_claim
+        else:
+            # 没有阻断项时清掉上一次的放行记录，避免旧记录冒充本次放行。
+            review["override_reason"] = ""
+            review["override_codes"] = []
+            review["override_at"] = ""
+            review["operator_claim"] = ""
         return {
             "task_draft": draft.model_dump(mode="json"),
             "meeting_brief": brief.model_dump(mode="json"),
@@ -908,7 +1012,7 @@ async def review_node(state: AgentState) -> dict[str, Any]:
         brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
         source = state.get("source_text") or ""
         dropped = drop_items_tool(draft, parsed.item_ids)
-        validation = validate_task_draft_tool(dropped, brief, source)
+        validation = validate_and_annotate(dropped, brief, source, extraction)
         review["revision_scope"] = "drop"
         review["dropped_item_ids"] = parsed.item_ids
         review["dropped_task_count"] = int(review["dropped_task_count"]) + len(parsed.item_ids)
@@ -973,21 +1077,55 @@ def route_after_review(
     return "review"
 
 
+def needs_override(state: AgentState) -> bool:
+    """finalize 前的兜底判据：还有非负责人 ERROR，但本次没有显式放行理由。"""
+    validation = ValidationResult.model_validate(state.get("validation") or {})
+    review = dict(state.get("review") or {})
+    if not blocking_codes(validation):
+        return False
+    return not str(review.get("override_reason") or "").strip()
+
+
+def route_after_finalize(state: AgentState) -> str:
+    """正常导出到 END；仍存在未放行的阻断错误则退回审核，而不是悄悄完成。"""
+    return "review" if needs_override(state) else END
+
+
 async def finalize_node(state: AgentState) -> dict[str, Any]:
-    """生成 Markdown。人工已在 review 拍板，此处不再因 owner ERROR 拦截。"""
+    """生成 Markdown。负责人 ERROR 可由人工批准；非负责人 ERROR 需显式放行。"""
     brief = MeetingBrief.model_validate(state.get("meeting_brief") or {})
     draft = TaskDraft.model_validate(state.get("task_draft") or {"items": []})
     validation = ValidationResult.model_validate(state.get("validation") or {})
+    extraction = ExtractionInfo.model_validate(state.get("extraction") or {})
     source = state.get("source_text") or ""
+    review = ReviewInfo.model_validate(state.get("review") or {})
 
-    md = export_markdown_tool(brief, draft, validation, source)
-    review = dict(state.get("review") or {})
-    review["approved"] = True
+    if needs_override(state):
+        # 兜底：理论上 review 已经拦住，这里防御绕过 review 直连 finalize 的路径。
+        return {
+            "status": ThreadStatus.PLANNING.value,
+            "review_action": {"route": "review"},
+            "review": review.model_dump(mode="json"),
+            "pending_events": _events(
+                _progress("finalize", "存在未放行的阻断问题，退回审核", "skipped"),
+            ),
+        }
+
+    md = export_markdown_tool(
+        brief,
+        draft,
+        validation,
+        source,
+        review=review,
+        extraction=extraction,
+    )
+    updated = review.model_copy(deep=True)
+    updated.approved = True
 
     return {
         "markdown_output": md,
         "status": ThreadStatus.COMPLETED.value,
-        "review": review,
+        "review": updated.model_dump(mode="json"),
         "review_action": None,
         "pending_events": _events(
             _tool_result({"tool": "export_markdown", "chars": len(md)}),

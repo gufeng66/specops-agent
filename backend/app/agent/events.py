@@ -45,8 +45,21 @@ def emit_result(data: dict[str, Any]) -> str:
     return _sse("result", data)
 
 
-def emit_error(message: str) -> str:
-    return _sse("error", {"message": message})
+def emit_error(
+    message: str,
+    *,
+    code: str = "",
+    thread_id: str = "",
+    run_id: str = "",
+) -> str:
+    payload: dict[str, Any] = {"message": message}
+    if code:
+        payload["code"] = code
+    if thread_id:
+        payload["thread_id"] = thread_id
+    if run_id:
+        payload["run_id"] = run_id
+    return _sse("error", payload)
 
 
 def emit_done() -> str:

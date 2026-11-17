@@ -35,6 +35,10 @@ include = ["app*"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "real_llm: 需要真实模型与 API Key 的用例；默认不选中（-m 'not real_llm'）",
+]
+addopts = "-m 'not real_llm'"
 
 [tool.ruff]
 line-length = 100

@@ -37,6 +37,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Console]::OutputEnc
 
 后端 Python 3.11+，CI 使用 Python 3.12；前端 Node.js 22+。依赖由 `backend/pyproject.toml` / `uv.lock` 和 `frontend/package.json` / `package-lock.json` 管理。不要顺手升级依赖或重写锁文件。
 
+仓库内已存在由 uv 管理的本地后端虚拟环境 `backend/.venv`（当前为 Python 3.13，已安装全部运行时依赖，`fastapi` / `uvicorn` / `pydantic` / `langgraph` / `aiosqlite` / `httpx` 均可正常导入）。启动后端直接用 `backend/.venv/Scripts/python.exe` 或 `uv run`，无需再跑 `uv sync`。需要跑测试 / 校验（pytest、ruff、respx 等 dev 依赖）且该组未安装时，再补 `uv sync --extra dev` 或 `uv run --extra dev`，不要在默认目录另装环境。
+
 ## 3. 业务不可破坏的约定
 
 1. **证据可追溯。** `evidence_kind=source` 时，`evidence_quote` 必须非空且为原始 `source_text` 的连续子串，不能改写成更顺的句子后冒充引用。推断使用 `inference` 并保留 `inference_reason`；保留 `acceptance_origin` 对会议、系统和人工验收标准的区分。
@@ -113,6 +115,6 @@ npm run test:e2e
 - 不提交 `.env`、API Key、凭据、SQLite 数据库及旁文件、日志、缓存、构建产物或本地 IDE 配置；示例配置只留空值或安全占位符。无需读真实 `.env` 即可完成的任务不要读取它。
 - 本地快照和 cassette 可能包含会议原文，不能随意公开或上传。新增第三方观测时须确认数据范围与脱敏，不能改变业务快照和评测结果。
 - 修改 API 字段、状态枚举、图路由、SSE、配置或导出行为时，同步对应的前后端契约、测试和文档；重要设计取舍记录到 `docs/adr/`。
-- `README.md` 提供运行入口，`docs/adr/0001` 至 `0006` 说明核心取舍，`docs/测试报告.md` 记录历史验证。文档与源码不符时应指出并核对，不能仅凭 ADR 文件存在就断言功能已实现。
+- `README.md` 提供运行入口，`docs/adr/0001` 至 `0010` 说明核心取舍，`docs/测试报告.md` 记录历史验证。文档与源码不符时应指出并核对，不能仅凭 ADR 文件存在就断言功能已实现。
 - README 中的 Production Hardening Roadmap 是未实现清单。鉴权、多租户隔离、入口限流、外部工单同步等没有实际实现和证据时，不对外宣称已具备或已生产验收。
 - 完成前检查本次差异，只交付任务所需文件，不顺手重构、不改无关内容、不留下临时产物。

@@ -39,5 +39,7 @@ async def export_thread(thread_id: str, format: str = Query("md", pattern="^(md|
             snapshot.task_draft,
             snapshot.validation,
             snapshot.source_text,
+            review=snapshot.review,
+            extraction=snapshot.extraction,
         )
     return PlainTextResponse(md, media_type="text/markdown")

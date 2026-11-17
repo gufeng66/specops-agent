@@ -38,10 +38,13 @@ def _replay(existing):
 @router.post("/stream")
 async def chat_stream(body: ChatStreamRequest):
     """SSE 开跑。认领事务通过后才执行图。"""
-    op = "clarify" if body.clarify_response else "start"
+    # 统一 strip：判断操作类型、request digest、workflow 入参和快照目标文本
+    # 必须用同一个标准化后的值，否则首尾空格会让幂等摘要与执行内容不一致。
+    clarify_text = (body.clarify_response or "").strip() or None
+    op = "clarify" if clarify_text else "start"
     payload = {
         "source_text": body.source_text,
-        "clarify_response": body.clarify_response,
+        "clarify_response": clarify_text,
     }
     interrupt_id = ""
     interrupt_type = ""
@@ -70,7 +73,7 @@ async def chat_stream(body: ChatStreamRequest):
                 result.snapshot,
                 body.source_text,
                 body.request_id,
-                clarify_response=body.clarify_response,
+                clarify_response=clarify_text,
                 interrupt_id=interrupt_id or None,
                 interrupt_type=interrupt_type or None,
             )

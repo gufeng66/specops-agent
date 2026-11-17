@@ -14,6 +14,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
+# 业务快照结构版本。写入路径统一拒绝高于本常量的快照，避免未来版本的数据被
+# 旧代码「读得懂但语义不对」地覆盖回库。只升不降：加字段时递增并写迁移。
+SNAPSHOT_SCHEMA_VERSION = 1
+
 
 class EvidenceKind(str, Enum):
     """证据类型。source=原文引用；inference=无法截取原文时的推断理由。"""
@@ -152,6 +156,23 @@ class ValidationResult(BaseModel):
         return len(self.error_issues) > 0
 
 
+class ExtractionInfo(BaseModel):
+    """本次分块抽取的覆盖情况。是部分失败告警的权威来源。
+
+    `partial`：有块失败但也有块成功，结果不完整；
+    `degraded`：所有块都失败，只剩规则底稿。
+    两者都要在审核面板和导出里明示，不能伪装成完整的模型结果。
+    """
+
+    chunks_total: int = 0
+    chunks_ok: int = 0
+    chunks_empty: int = 0
+    chunks_failed: int = 0
+    partial: bool = False
+    degraded: bool = False
+    detail: str = ""
+
+
 class ThreadStatus(str, Enum):
     """HTTP 层线程状态。三种 HITL（澄清/分配/审核）都记成 awaiting_review，前端靠 interrupt.type 区分。"""
 
@@ -173,6 +194,11 @@ class ReviewInfo(BaseModel):
     reviewed_task_count: int = 0
     edited_item_ids: list[str] = Field(default_factory=list)
     dropped_task_count: int = 0
+    # 人工放行记录。operator_claim 是用户自述，不代表已认证身份。
+    override_reason: str = ""
+    override_codes: list[str] = Field(default_factory=list)
+    override_at: str = ""
+    operator_claim: str = ""
 
 
 class ThreadSnapshot(BaseModel):
@@ -185,6 +211,7 @@ class ThreadSnapshot(BaseModel):
     meeting_brief: MeetingBrief = Field(default_factory=MeetingBrief)
     task_draft: TaskDraft = Field(default_factory=TaskDraft)
     validation: ValidationResult = Field(default_factory=ValidationResult)
+    extraction: ExtractionInfo = Field(default_factory=ExtractionInfo)
     run_id: str = ""
     interrupt_id: str = ""
     interrupt_payload: dict | None = None
@@ -194,18 +221,32 @@ class ThreadSnapshot(BaseModel):
     token_out: int = 0
     latency_ms: int = 0  # 成功模型调用耗时之和，不含失败尝试和退避
     wall_ms: int = 0  # 本次执行段墙钟，不含人工审核停留
+    llm_calls: int = 0  # 本执行段发出的 HTTP 尝试数，含传输/schema 重试
+    transport_retries: int = 0  # 429/5xx/传输错误引起的重试次数
+    schema_retries: int = 0  # JSON/schema 校验失败引起的重试次数
+    llm_failures: int = 0  # 失败的 HTTP 尝试数，含重试中间的失败
     graph_ns: str = ""  # checkpointer 线程键，HITL resume 必须稳定
+    checkpoint_id: str = ""  # 最近一次对齐到的 checkpoint，跨库恢复时用于发现失配
     prompt_version: str = ""
+    schema_version: int = 1  # 数据结构兼容版本，只用于读旧数据
+    revision: int = 0  # 同一线程的逻辑版本，写入时做 CAS
     created_at: str = ""
     updated_at: str = ""
 
     def export_dict(self) -> dict:
-        """交付用 JSON：去掉 HITL 专用的 owner_suggestions，避免建议漏进导出。"""
+        """交付用 JSON：递归去掉 HITL 专用建议，绝不改动恢复快照。"""
         data = self.model_dump(mode="json")
-        items = ((data.get("task_draft") or {}).get("items")) or []
-        for item in items:
-            if isinstance(item, dict):
-                item.pop("owner_suggestions", None)
+
+        def strip_suggestions(value: object) -> None:
+            if isinstance(value, dict):
+                value.pop("owner_suggestions", None)
+                for child in value.values():
+                    strip_suggestions(child)
+            elif isinstance(value, list):
+                for child in value:
+                    strip_suggestions(child)
+
+        strip_suggestions(data)
         return data
 
 

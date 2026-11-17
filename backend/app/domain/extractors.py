@@ -13,7 +13,9 @@ from app.config import settings
 from app.domain.models import (
     ActionItem,
     EvidenceKind,
+    ExtractionInfo,
     MeetingBrief,
+    ReviewInfo,
     TaskDraft,
     ValidationResult,
 )
@@ -505,23 +507,63 @@ def apply_owner_assignments(
     return TaskDraft(items=list(by_id.values()), version=draft.version + 1)
 
 
+_MD_ESCAPE_CHARS = "\\`*_[]()<>#|~"
+
+
+def _md_inline(text: str) -> str:
+    """渲染层转义。只影响导出的字符串，不改领域对象里保存的原文/证据。"""
+    cleaned = str(text or "").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    return "".join("\\" + ch if ch in _MD_ESCAPE_CHARS else ch for ch in cleaned)
+
+
+def _longest_backtick_run(text: str) -> int:
+    """找最长的连续反引号，用更长的围栏包住原文，避免被内容提前闭合。"""
+    longest = 0
+    run = 0
+    for ch in text:
+        if ch == "`":
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    return longest
+
+
 def render_markdown(
     brief: MeetingBrief,
     draft: TaskDraft,
     validation: ValidationResult,
     source_text: str,
+    review: ReviewInfo | None = None,
+    extraction: ExtractionInfo | None = None,
 ) -> str:
-    """按人看板导出。不读 owner_suggestions；待分配单独成节。"""
+    """按人看板导出。不读 owner_suggestions；待分配单独成节。
+
+    结构字段走 _md_inline 转义；未消解引用、放行理由都是自由文本，同样转义。
+    原文整块放进长度大于内容反引号串的围栏里，既不被截断，也不执行 HTML。
+    """
     task_count = len(draft.items)
     lines = [
         "# 会议纪要",
         "",
-        f"**会议目标**: {brief.goal or '（未明确）'}",
-        f"**会议日期**: {brief.meeting_date or '（未识别）'}",
-        f"**干系人**: {'、'.join(brief.stakeholders) if brief.stakeholders else '（未识别）'}",
+        f"**会议目标**: {_md_inline(brief.goal) or '（未明确）'}",
+        f"**会议日期**: {_md_inline(brief.meeting_date) or '（未识别）'}",
+        f"**干系人**: {'、'.join(_md_inline(n) for n in brief.stakeholders) if brief.stakeholders else '（未识别）'}",
         f"**任务数**: {task_count}",
-        "",
     ]
+    if extraction is None:
+        lines.append("**抽取状态**: 未记录")
+    else:
+        lines.append(
+            "**抽取状态**: "
+            f"成功 {extraction.chunks_ok} / 零任务 {extraction.chunks_empty} / "
+            f"失败 {extraction.chunks_failed}"
+        )
+        if extraction.chunks_failed > 0:
+            lines.append("⚠️ 结果不完整，请人工确认")
+        if extraction.degraded:
+            lines.append("⚠️ 当前仅保留规则结果")
+    lines.append("")
     if task_count == 0:
         lines.extend(["## 本次无任务", "", "审核后确认本次会议没有可执行任务。", ""])
 
@@ -540,15 +582,15 @@ def render_markdown(
     assigned_ids: set[str] = set()
 
     def primary_line(index: int, item: ActionItem) -> str:
-        parts = [f"{index}. **{item.title}**"]
-        parts.append(item.deadline or "待定")
+        parts = [f"{index}. **{_md_inline(item.title)}**"]
+        parts.append(_md_inline(item.deadline) or "待定")
         if item.secondary_owners:
-            parts.append("配合：" + "、".join(item.secondary_owners))
+            parts.append("配合：" + "、".join(_md_inline(n) for n in item.secondary_owners))
         return " · ".join(parts)
 
     def collab_line(item: ActionItem) -> str:
-        owner = item.primary_owner or "—"
-        return f"配合 · {item.title}（主责{owner}）"
+        owner = _md_inline(item.primary_owner) or "—"
+        return f"配合 · {_md_inline(item.title)}（主责{owner}）"
 
     if people:
         for name in people:
@@ -563,9 +605,9 @@ def render_markdown(
             if not primary_items and not secondary_items:
                 continue
             if primary_items:
-                lines.append(f"## {name}（主责 {len(primary_items)}）")
+                lines.append(f"## {_md_inline(name)}（主责 {len(primary_items)}）")
             else:
-                lines.append(f"## {name}（配合 {len(secondary_items)}）")
+                lines.append(f"## {_md_inline(name)}（配合 {len(secondary_items)}）")
             lines.append("")
             for idx, item in enumerate(primary_items, 1):
                 assigned_ids.add(item.id)
@@ -587,27 +629,43 @@ def render_markdown(
     if leftover:
         lines.extend(["## 待分配", ""])
         for item in leftover:
-            extra = f"（未消解：{item.unresolved_ref}）" if item.unresolved_ref else ""
-            lines.append(f"- **{item.title}**{extra}")
+            extra = f"（未消解：{_md_inline(item.unresolved_ref)}）" if item.unresolved_ref else ""
+            lines.append(f"- **{_md_inline(item.title)}**{extra}")
         lines.append("")
 
     if validation.issues:
         lines.extend(["## 未解决问题", ""])
         for issue in validation.issues:
             marker = "⚠️" if issue.severity.value == "advisory" else "❌"
-            lines.append(f"- {marker} [{issue.code}] {issue.message}")
+            lines.append(f"- {marker} [{_md_inline(issue.code)}] {_md_inline(issue.message)}")
+        lines.append("")
+
+    if review is not None and review.override_reason:
+        # 人工放行必须留痕：谁（自述）、什么时候、放行了哪些问题码、为什么。
+        lines.extend(["## 人工放行", ""])
+        claim = _md_inline(review.operator_claim) or "（未填写）"
+        lines.append(f"- 放行人（自述，未认证）：{claim}")
+        lines.append(f"- 放行时间：{_md_inline(review.override_at) or '（未记录）'}")
+        lines.append(f"- 放行理由：{_md_inline(review.override_reason)}")
+        codes = "、".join(_md_inline(code) for code in review.override_codes) or "（未记录）"
+        lines.append(f"- 放行问题码：{codes}")
         lines.append("")
 
     source = source_text or ""
     summary = f"共 {task_count} 条任务 / 原文 {len(source)} 字"
     if len(source) > settings.source_soft_limit_chars:
         summary += "，已分块抽取"
-    lines.append(summary)
-    lines.append("")
-    lines.append("<details>")
-    lines.append("<summary>原文</summary>")
-    lines.append("")
-    lines.append(source)
-    lines.append("")
-    lines.append("</details>")
+    fence = "`" * max(3, _longest_backtick_run(source) + 1)
+    lines.extend(
+        [
+            summary,
+            "",
+            "## 原文（原样，未转义）",
+            "",
+            f"{fence}text",
+            source,
+            fence,
+            "",
+        ]
+    )
     return "\n".join(lines)
